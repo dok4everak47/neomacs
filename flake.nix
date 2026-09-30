@@ -28,7 +28,16 @@
     };
   in {
     devShells.${system}.default = pkgs.mkShell {
-      packages = [rustToolchain];
+      packages = [
+        rustToolchain
+        # neomacs-terminfo's build.rs probes pkg-config for ncurses/ncursesw.
+        # The Nix apple-sdk ships no libncurses.tbd, so both the .pc files
+        # (pkg-config) and the linkable library (ncurses) must come from
+        # nixpkgs; without them the final link fails with
+        # "ld: library not found for -lncurses".
+        pkgs.pkg-config
+        pkgs.ncurses
+      ];
       RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
 
       shellHook = ''
