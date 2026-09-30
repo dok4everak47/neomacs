@@ -49,14 +49,23 @@ The TUI harness uses `target/release/neomacs` by default, regardless of the
 Cargo test profile. Set `NEOMACS_TUI_NEOMACS_BIN` to use a different binary.
 
 The GNU side of every pair comparison is whichever `emacs` is first on `PATH`,
-and it must be the parity reference pinned in `parity-reference.toml`
-(Emacs 31.0.90, the revision the Lisp tree is synced to). Newer releases
-change what the shared Lisp renders: Emacs 31.0.91 and 31.1 dropped the
-`min-width` padding from `mode-line-position`, so against them almost every
-TUI pair test fails on the mode-line row. CI compiles that exact commit in
-`.github/actions/setup-gnu-emacs`; locally, build the `emacs-31.0.90` tag
-without native compilation and put its `bin` first on `PATH` for the TUI
-and GUI suites.
+and it must be the parity reference pinned in `parity-reference.toml`. Do not
+read the version from this document — the pin moves with the Lisp tree, and
+`parity-reference.toml` is the single record of it.
+
+That pin is a *configuration*, not just a version. Two 31.1 builds with
+different `./configure` flags are different oracles: a TTY-only build lacks
+the 107 window-system mouse bindings the pinned GTK3 reference has, and those
+long keys push a `describe-bindings` block's max key into a wider alignment
+bucket, padding every row in it one tab-width differently — 706 differing
+rows in a single test, and every TUI shard red. `emacs-version` alone will
+not tell you which oracle you have.
+
+CI compiles the pinned commit with the pinned configuration in
+`.github/actions/setup-gnu-emacs` and asserts the feature set (X11, GTK3,
+tree-sitter, no native compilation) before any suite runs. Locally, build
+that same reference — the configure line is in the action — and put its
+`bin` first on `PATH` for the TUI and GUI suites.
 
 Set `NEOMACS_TUI_RECORD=on` to write an asciicast v3 recording for every
 `TuiSession`. Recording is disabled by default. Core parity tests are grouped
