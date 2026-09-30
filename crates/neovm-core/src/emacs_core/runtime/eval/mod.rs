@@ -2869,6 +2869,16 @@ pub(crate) enum ResumeTarget {
         spec_depth: usize,
         bind_stack_len: usize,
     },
+    /// GNU's `internal_condition_case_1` at an async callback boundary
+    /// (`src/process.c:6571` for filters, `:7845` for sentinels).
+    ///
+    /// The frame exists to STOP the handler search, not to resume Lisp: GNU
+    /// reports the error from that case's C handler
+    /// (`read_process_output_error_handler`, `exec_sentinel_error_handler`),
+    /// which this port does in `finish_callback_flow` once the signal is back
+    /// out of `apply`. Selecting this target therefore ends dispatch, and the
+    /// `Flow::Signal` is what propagates.
+    AsyncCallbackBoundary,
 }
 
 #[derive(Clone, Debug)]

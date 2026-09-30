@@ -280,7 +280,29 @@ impl Context {
 
         tracing::debug!("command_loop_top_level_1: evaluating top-level form");
         self.log_startup_state("top-level-before");
-        match self.eval_value(&top_level) {
+        // GNU keyboard.c:1174-1185 `top_level_2`: in batch, the handler for
+        // `debug-early--handler` is pushed BEFORE the top-level eval and
+        // popped after, so an uncaught error prints its backtrace while the
+        // signalling frames are still live. `debug-early--handler` itself
+        // honours `backtrace-on-error-noninteractive`, and because it is a
+        // HANDLER_BIND frame a normal return resumes the handler search --
+        // exactly GNU eval.c:1909-1921. Installing it only here (never in
+        // `report_command_error`) is what keeps process filter/sentinel
+        // errors backtrace-free, as GNU's are.
+        let setup_handler = self.command_loop_noninteractive();
+        let handler_stack_base = self.condition_stack_len();
+        if setup_handler {
+            self.push_condition_frame(ConditionFrame::HandlerBind {
+                conditions: Value::list(vec![Value::from_sym_id(error_symbol())]),
+                handler: Value::symbol("debug-early--handler"),
+                mute_span: 0,
+            });
+        }
+        let top_level_result = self.eval_value(&top_level);
+        if setup_handler {
+            self.truncate_condition_stack(handler_stack_base);
+        }
+        match top_level_result {
             Ok(_) => {
                 tracing::debug!("command_loop_top_level_1: top-level completed OK");
                 self.log_startup_state("top-level-after");

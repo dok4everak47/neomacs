@@ -123,11 +123,14 @@ fn as_signal_mut_edits_the_payload_in_place() {
     crate::test_utils::init_test_tracing();
     let _eval = Context::new();
     let mut flow = signal(LispCondition::Error, vec![Value::fixnum(7)]);
-    flow.as_signal_mut().expect("a signal").search_complete = true;
+    flow.as_signal_mut()
+        .expect("a signal")
+        .dispatch
+        .search_complete = true;
     let FlowKind::Signal(sig) = flow.into_kind() else {
         panic!("still a signal")
     };
-    assert!(sig.search_complete);
+    assert!(sig.dispatch.search_complete);
 
     let mut thrown = Flow::throw(Value::symbol("tag"), Value::NIL);
     assert!(thrown.as_signal_mut().is_none());

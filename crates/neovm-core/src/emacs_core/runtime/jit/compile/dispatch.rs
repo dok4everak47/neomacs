@@ -3038,7 +3038,7 @@ pub extern "C" fn neovm_jit_match_handler(ctx: *mut u8, ours: i64, out: *mut i64
                             continue;
                         }
                     };
-                    let Some(selected) = sig.selected_resume.clone() else {
+                    let Some(selected) = sig.dispatch.selected_resume.clone() else {
                         for _ in 0..remaining {
                             ctx.pop_condition_frame();
                         }

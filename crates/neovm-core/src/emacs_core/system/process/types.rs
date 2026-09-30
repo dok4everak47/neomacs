@@ -4,6 +4,7 @@
 //! parent's view of its private items (`use super::*`).
 
 use super::*;
+use crate::emacs_core::eval::{ConditionFrame, ResumeTarget};
 
 /// Unique identifier for a process.
 pub type ProcessId = u64;
@@ -8046,7 +8047,32 @@ impl super::super::eval::Context {
         let result = (|| {
             self.try_specbind_or_unwind_to(specpdl_count, intern("inhibit-quit"), Value::T)?;
             self.try_specbind_or_unwind_to(specpdl_count, intern("last-nonmenu-event"), Value::T)?;
-            self.apply(callback, args)
+            // GNU wraps every filter/sentinel call in its own
+            // `internal_condition_case_1` (src/process.c:6571-6574 for filters,
+            // :7845-7848 for sentinels), so a signalling callback is caught
+            // HERE -- by the innermost matching frame -- and never reaches the
+            // top-level `top_level_2` `debug-early--handler` binding.  That is
+            // what keeps a callback error's report backtrace-free while an
+            // uncaught top-level error still prints one: the signal comes back
+            // out of `apply` with `selected_resume` pointing at this very
+            // frame, `finish_callback_flow` reports it through
+            // `report_command_error` under this callback's context string, and
+            // the handler search is already complete.
+            //
+            // GNU passes its `Qerror` handler here for the same reason this
+            // frame is a plain CONDITION_CASE: it is what
+            // `find_handler_clause` (eval.c:1893-1896) matches, NOT a
+            // `handler-bind` frame, so a `handler-bind` in the CALLBACK sees
+            // the error first (GNU and this port agree) while a `handler-bind`
+            // OUTSIDE the callback does not see it at all.
+            let callback_stack_base = self.condition_stack_len();
+            self.push_condition_frame(ConditionFrame::ConditionCase {
+                conditions: Value::symbol("error"),
+                resume: ResumeTarget::AsyncCallbackBoundary,
+            });
+            let applied = self.apply(callback, args);
+            self.truncate_condition_stack(callback_stack_base);
+            applied
         })();
         self.match_data = saved_match_data;
         if let Some(buffer_id) = saved_current_buffer {

@@ -34,6 +34,9 @@ pub enum EvalError {
         symbol: SymId,
         data: Vec<Value>,
         raw_data: Option<Value>,
+        /// Handler-search state carried across the boundary. See
+        /// [`SignalDispatchState`] for why it is not simply recomputed.
+        dispatch: SignalDispatchState,
         /// Not constructible outside `error.rs`; see the type docs.
         pin: InFlightRoots,
     },
@@ -51,6 +54,17 @@ impl EvalError {
     /// The only way to build a signal error: pins the symbol and payload as GC
     /// roots for as long as the error (or any clone of it) lives.
     pub fn signal(symbol: SymId, data: Vec<Value>, raw_data: Option<Value>) -> Self {
+        Self::signal_with_dispatch(symbol, data, raw_data, SignalDispatchState::default())
+    }
+
+    /// [`Self::signal`] for a caller that already holds the handler-search
+    /// state of the flow it is converting.
+    pub(crate) fn signal_with_dispatch(
+        symbol: SymId,
+        data: Vec<Value>,
+        raw_data: Option<Value>,
+        dispatch: SignalDispatchState,
+    ) -> Self {
         let pin = InFlightRoots::pin(
             std::iter::once(Value::from_sym_id(symbol))
                 .chain(data.iter().copied())
@@ -60,6 +74,7 @@ impl EvalError {
             symbol,
             data,
             raw_data,
+            dispatch,
             pin,
         }
     }
@@ -115,8 +130,17 @@ pub(crate) fn flow_from_eval_error(err: EvalError) -> Flow {
             symbol,
             data,
             raw_data,
+            dispatch,
             ..
-        } => Flow::Signal(Box::new(SignalData::new(symbol, data, raw_data, false))),
+        } => {
+            // `suppress_signal_hook` is deliberately not round-tripped: it is
+            // consumed by `run_signal_hook` at the ORIGIN of the signal, and
+            // by the time a flow is crossing a boundary that hook has already
+            // run (or been suppressed) once.
+            let mut sig = SignalData::new(symbol, data, raw_data, false);
+            sig.dispatch = dispatch;
+            Flow::Signal(Box::new(sig))
+        }
         EvalError::UncaughtThrow { tag, value, .. } => Flow::throw(tag, value),
         EvalError::Shutdown(request) => Flow::Shutdown(request),
     }
@@ -419,8 +443,9 @@ pub struct SignalData {
     /// Original cdr payload when a signal uses non-list data.
     pub raw_data: Option<Value>,
     pub(crate) suppress_signal_hook: bool,
-    pub(crate) selected_resume: Option<ResumeTarget>,
-    pub(crate) search_complete: bool,
+    /// Handler-search state. Public only so it can travel with a `Flow`;
+    /// opaque by construction so the states it can be in stay in `eval`.
+    pub dispatch: SignalDispatchState,
     /// Keeps `data` and `raw_data` reachable for the collector while this
     /// signal is in flight. PRIVATE on purpose: it is what makes an unrooted
     /// signal payload unrepresentable outside this module — a struct with a
@@ -450,8 +475,7 @@ impl SignalData {
             data,
             raw_data,
             suppress_signal_hook,
-            selected_resume: None,
-            search_complete: false,
+            dispatch: SignalDispatchState::searching(),
             pin,
         }
     }
@@ -459,6 +483,41 @@ impl SignalData {
     /// Resolve the signal symbol name via the interner.
     pub fn symbol_name(&self) -> &str {
         resolve_sym(self.symbol)
+    }
+}
+
+/// How far `signal_or_quit`'s handler search has got.
+///
+/// GNU carries this in the C `error` object plus the handler list it walks
+/// (`src/eval.c:1839-1972`): once a `CONDITION_CASE` clause matches, the search
+/// is over and `unwind_to_catch` jumps straight to that clause's `specpdl`
+/// entry, so the handlers between the signal and its catcher never run again.
+///
+/// This port's cross-boundary conversion used to drop that fact: `map_flow`
+/// kept only symbol/data/raw-data, and `flow_from_eval_error` rebuilt the
+/// payload with the search un-done. A `Flow::Signal` that crossed one of those
+/// boundaries -- every nested `load`, every `eval-buffer` -- therefore
+/// re-entered the search at the top, and each `handler-bind` handler on the
+/// way back out ran once per boundary. Measured: `-l FILE` signalling an error
+/// ran `debug-early--handler` three times and printed three backtraces, where
+/// GNU runs it once and prints one (ledger 220).
+///
+/// `selected_resume` is a token, not a position: every consumer compares it
+/// for identity against the frames it is about to discard
+/// (`sf_condition_case`, `resume_nonlocal`, the JIT's resume shim) and falls
+/// through to the old behaviour when it matches nothing. Carrying it across a
+/// boundary can therefore only restore a delivery that GNU makes too; it
+/// cannot deliver to a frame the unwinder would have skipped.
+#[derive(Clone, Debug, Default)]
+pub struct SignalDispatchState {
+    pub(crate) selected_resume: Option<ResumeTarget>,
+    pub(crate) search_complete: bool,
+}
+
+impl SignalDispatchState {
+    /// The state a freshly signalled payload starts in.
+    pub(crate) fn searching() -> Self {
+        Self::default()
     }
 }
 
@@ -817,7 +876,12 @@ pub fn map_flow(flow: Flow) -> EvalError {
         Flow::Signal(sig) => {
             // `sig` (and with it the SignalData pin) stays alive until the new
             // pin is taken, so the payload is never momentarily unrooted.
-            EvalError::signal(sig.symbol, sig.data.clone(), sig.raw_data)
+            EvalError::signal_with_dispatch(
+                sig.symbol,
+                sig.data.clone(),
+                sig.raw_data,
+                sig.dispatch.clone(),
+            )
         }
         Flow::Throw(thrown) => EvalError::uncaught_throw(thrown.tag, thrown.value),
         Flow::Shutdown(request) => EvalError::Shutdown(request),

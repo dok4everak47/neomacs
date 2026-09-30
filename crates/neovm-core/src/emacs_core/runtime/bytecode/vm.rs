@@ -8860,7 +8860,7 @@ impl<'a> Vm<'a> {
                 }) = unwind_handlers_to_selected_resume(
                     handlers,
                     &mut self.ctx.condition_stack,
-                    sig.selected_resume.as_ref(),
+                    sig.dispatch.selected_resume.as_ref(),
                 ) {
                     let root_scope = self.ctx.save_vm_roots();
                     self.ctx.push_vm_frame_root(Value::from_sym_id(sig.symbol));

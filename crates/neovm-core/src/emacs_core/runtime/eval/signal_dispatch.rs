@@ -105,7 +105,7 @@ impl Context {
         &mut self,
         sig: Box<SignalData>,
     ) -> Result<Box<SignalData>, Flow> {
-        if sig.search_complete {
+        if sig.dispatch.search_complete {
             return Ok(sig);
         }
         self.dispatch_signal(*sig).map(Box::new)
@@ -177,8 +177,8 @@ impl Context {
                         &conditions,
                     ) {
                         self.maybe_call_debugger_for_signal(&sig, Some(&conditions))?;
-                        sig.selected_resume = Some(resume);
-                        sig.search_complete = true;
+                        sig.dispatch.selected_resume = Some(resume);
+                        sig.dispatch.search_complete = true;
                         return Ok(sig);
                     }
                 }
@@ -252,8 +252,8 @@ impl Context {
             None
         };
         self.last_uncaught_signal_backtrace = captured_backtrace;
-        sig.search_complete = true;
-        sig.selected_resume = None;
+        sig.dispatch.search_complete = true;
+        sig.dispatch.selected_resume = None;
         Ok(sig)
     }
 

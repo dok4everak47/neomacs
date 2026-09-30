@@ -1074,7 +1074,7 @@ impl Context {
                 if let Some(ResumeTarget::InterpreterConditionCase {
                     handler_index,
                     condition_stack_base: selected_stack_base,
-                }) = sig.selected_resume.clone()
+                }) = sig.dispatch.selected_resume.clone()
                     && selected_stack_base == condition_stack_base
                 {
                     let handler = handlers_vec[handler_index];
