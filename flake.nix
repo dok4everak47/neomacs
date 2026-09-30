@@ -1,64 +1,46 @@
 {
-  description = "Neomacs - GPU-accelerated Emacs written in Rust with a modern, multithreaded architecture";
+  description = "neomacs — a GPU-accelerated Emacs written in Rust (local dev shell)";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-
-    flake-parts = {
-      url = "github:hercules-ci/flake-parts";
-      inputs.nixpkgs-lib.follows = "nixpkgs";
-    };
-
-    crane.url = "github:ipetkov/crane";
-
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # rust-overlay: 提供锁定的最新 stable toolchain + rust-src
+    # (模板注释建议的 per-project toolchain 方案)
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
-    home-manager = {
-      url = "github:nix-community/home-manager";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    # WPE WebKit keeps its own pinned nixpkgs because its Cachix artifacts are
-    # built against that revision. Following our nixpkgs would force an
-    # expensive source rebuild.
-    nix-wpe-webkit.url = "github:eval-exec/nix-wpe-webkit";
   };
 
-  outputs =
-    inputs@{ flake-parts, ... }:
-    flake-parts.lib.mkFlake { inherit inputs; } {
-      # No x86_64-darwin: Nixpkgs 26.11 dropped the system outright, so every
-      # advertised contract for it fails to evaluate ("Nixpkgs 26.11 has
-      # dropped support for x86_64-darwin"), which took `nix flake check
-      # --all-systems` down with it.  The Intel-mac release artifacts still
-      # come from the `macos-15-intel` runners in release.yml, which build
-      # with Cargo rather than through this flake.
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "aarch64-darwin"
-      ];
-
-      imports = [
-        ./nix/modules/overlays.nix
-        ./nix/modules/packages.nix
-        ./nix/modules/dev-shells.nix
-        ./nix/modules/checks.nix
-        ./nix/modules/formatter.nix
-      ];
+  outputs = {
+    self,
+    nixpkgs,
+    rust-overlay,
+  }: let
+    # 本机 Apple Silicon macOS；日后如需跨平台再扩展 systems
+    system = "aarch64-darwin";
+    pkgs = import nixpkgs {
+      inherit system;
+      overlays = [rust-overlay.overlays.default];
     };
+    # 锁定到最新 stable + 开发扩展
+    rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+      extensions = ["rust-src" "rust-analyzer" "clippy" "rustfmt"];
+    };
+  in {
+    devShells.${system}.default = pkgs.mkShell {
+      packages = [rustToolchain];
+      RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
 
-  nixConfig = {
-    extra-substituters = [
-      "https://eval-exec.cachix.org"
-      "https://nix-wpe-webkit.cachix.org"
-    ];
-    extra-trusted-public-keys = [
-      "eval-exec.cachix.org-1:xvopUI7X7+Vt1gaSsWJ0PQFPP66vs8v5iIaz6boxf64="
-      "nix-wpe-webkit.cachix.org-1:ItCjHkz1Y5QcwqI9cTGNWHzcox4EqcXqKvOygxpwYHE="
-    ];
+      shellHook = ''
+        # ClashBar proxy on 127.0.0.1:7890 -- exported only while it is
+        # listening, so a dead proxy never breaks the shell's network.
+        if (echo > /dev/tcp/127.0.0.1/7890) 2>/dev/null; then
+          export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890
+          export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890
+          export all_proxy=socks5://127.0.0.1:7890 ALL_PROXY=socks5://127.0.0.1:7890
+          export no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1
+        fi
+      '';
+    };
   };
 }
