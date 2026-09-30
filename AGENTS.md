@@ -57,9 +57,21 @@
   注意：上游 CI 合同（`nix flake check`、cachix 发布）覆盖的是上游 flake，不是本机这份。
 - **绝不把工具链装到全局**；不要随手升级 `rust-toolchain.toml` 或 flake 输入——
   版本在安装脚本与 CI 多处联动（历史上一次工具链更新需要同步一批引用）。
-- 网络：本机 HTTP 客户端走 ClashBar 代理 `127.0.0.1:7890`（git 已配置）；
-  Nix 侧有 `eval-exec.cachix.org` / `nix-wpe-webkit.cachix.org` substituter。
-  沙箱内需要联网下载（nix / cargo fetch）或写 `.git` 时，按系统流程提权并说明要做什么。
+- 网络：本机 HTTP 客户端走 ClashBar 代理 `127.0.0.1:7890`（git 已配置）。
+  注意 Clash 开着 fake-ip，**连 `cache.nixos.org` 都解析到 `198.18.0.0/16`**，
+  所以"直连 vs 走代理"在本机基本没有区别，个别请求失败多半是抖动——
+  不要据此下"某个源在国内不可达"的结论，先重测几次。
+  Nix 侧 substituter 按 `/etc/nix/nix.conf`（`cache.nixos.org` + 国内 `cache.numtide.com`）；
+  `eval-exec.cachix.org` / `nix-wpe-webkit.cachix.org` 只在上游 flake 的 `nixConfig` 里，
+  本机精简 flake 用不到。沙箱内需要联网下载（nix / cargo fetch）或写 `.git` 时，
+  按系统流程提权并说明要做什么。
+- **不用 rustup，也不需要给 rustup 配镜像**：本机没有 rustup 进程，`rustc`/`cargo` 全部来自
+  Nix store（实测 `rustc 1.98.1`），而 rustup 的镜像设置（`RUSTUP_DIST_SERVER` /
+  `RUSTUP_UPDATE_ROOT`）对不存在的 rustup 不生效。crate 下载同样**不要**照搬其他项目的
+  rsproxy 配置：本仓库 `.cargo/config.toml` 不动 source，`static.crates.io` 与
+  `index.crates.io` 实测均可达（走代理或直连都已通过）；给这个近千依赖的 workspace
+  引入国内 CDN 单点得不偿失。只有真去装 rustup 工具链或跑 PGO 时才需要 rustup，
+  那时也不是镜像能解决的，而是走代理。
 - macOS 上内联浏览器走系统 WKWebView；`video` 后端仅在 Linux（linked-gstreamer）。
   带 GUI/GPU 的验证需要真实桌面会话；起不来的话先检查 display 环境，不要把环境问题当代码问题。
 
