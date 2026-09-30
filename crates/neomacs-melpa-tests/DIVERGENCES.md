@@ -48452,3 +48452,218 @@ Twelve assertions cover: absolute, `@loader_path`, `@rpath` via `LC_RPATH`, fram
 - **"Fontconfig is dead code on macOS."** No -- three live call sites, found by making the compiler check rather than by reading.
 - **"The Windows failure is the known aarch64 ownership-contract flake."** No. Both Windows jobs failed at `Package .exe installer`, one step earlier, for a reason I introduced.
 - **"The macOS artifact was self-contained before this change."** No. It was satisfied by co-location inside the GStreamer SDK's lib directory, which is why removing GStreamer -- a change about *video* -- broke *fonts*.
+
+## 220. A `handler-bind` handler ran once per boundary the error crossed, not once per signal: this port re-entered GNU's handler-list walk at every `Flow -> EvalError -> Flow` conversion, so `-l FILE` printed three backtraces where GNU prints one, and the count GREW with nesting -- 3 at one `load`, 7 at two, 9 at three, against GNU's 1 at every depth. The fix carries the handler-search state across the conversion. **This entry is the third face of one defect**, after the batch top-level backtrace itself and the process-callback double-report that the two preceding changes earned.
+
+**Task.** Finish porting GNU's batch error reporting (`top_level_2`'s `debug-early--handler` binding, `src/keyboard.c:1174-1185`) by closing the one case that still diverged.
+
+### 1. Provenance
+
+Base `17215b2a1`, `origin/main`, working tree carrying the two preceding changes. GNU is the pinned 31.1 for parity decisions (`parity-reference.toml`); the `PATH` `emacs` is **30.2** (nix store `emacs-30.2`), which is why the acceptance test that closed this entry asserts GNU's *criteria* rather than a byte snapshot -- see "Hypotheses eliminated" item 3. `cargo xtask fresh-build --release` ran clean on the final tree.
+
+### 2. GNU, read for this topic
+
+Read fresh from `/tmp/eval.c` and `/tmp/kbd.c`, not recalled.
+
+- `src/keyboard.c:1174-1185` `top_level_2`: in batch, `push_handler_bind (list1 (Qerror), Qdebug_early__handler, 0)` **around** `Feval (Vtop_level, Qt)`, then `pop_handler ()`.
+- `src/eval.c:1909-1922`, the `case HANDLER_BIND` arm of `signal_or_quit`: the handler is called **inside** the handler-list walk, `call1 (h->val, error)` at `:1917`, and the walk `continue`s rather than stopping. A `CONDITION_CASE` arm that matches instead sets `clause` and breaks.
+- `src/eval.c:1959-1960`: with a `clause` in hand, `unwind_to_catch (h, NONLOCAL_EXIT_SIGNAL, error)` jumps straight to the matching `specpdl` entry. The frames between the signal and that entry are discarded **as a group**, and the handler list is walked **once** for the whole signal. The handler walk and the unwind are one pass over one list; nothing re-enters them for the same signal.
+- `src/process.c:6571-6574` and `:7845-7848` wrap each filter/sentinel callback in `internal_condition_case_1`, which is why a callback error's report is backtrace-free while an uncaught top-level error's is not.
+
+### 3. What neomacs had, measured
+
+The handler really does run more than once, and the count is a function of nesting depth. Probe: `fset` a logging wrapper over `debug-early--handler`, run `-l FILE` where `FILE` signals, in both editors.
+
+| depth | this tree, before the fix | this tree, after | GNU |
+| --- | --- | --- | --- |
+| 1 (`-l leaf.el`) | 3 | **1** | 1 |
+| 2 (`leaf` loaded by `middle`) | 7 | **1** | 1 |
+| 3 (`middle` loaded by `outer`) | 9 | **1** | 1 |
+
+The "before" column is this tree with the `top_level_2` port already in place
+(the preceding change) and this entry's fix **not** yet applied -- that is the
+state in which the divergence is observable at all. The stale
+`/Applications/neomacs.app` binary is **not** the baseline for this table: it
+prints **0** blocks at every depth, because before the `top_level_2` port this
+port had no top-level handler and no backtrace to re-print. The two changes are
+what turn 0 into 3/7/9 and then into 1.
+
+The three stacks at depth 1 are a **nested** sequence, not three different errors: the first carries `signal/error/eval-buffer/load-with-code-conversion/load`, the second `eval-buffer/load-with-code-conversion/load`, the third `load` alone -- each one the tail of the one before, printed at a progressively shorter call depth. `debug-early-backtrace...done` appears three times on stderr, once per handler call.
+
+A second probe wrapped `signal` itself and logged through `write-region` rather than `princ` (buffering had already produced one wrong reading): `signal` runs **once** in both editors, while `debug-early--handler` runs once in GNU and three times here. So this is not a re-signal; it is a re-**dispatch** of the same signal object.
+
+### 4. Root cause
+
+`Flow::Signal` carries a `SignalData`, and `SignalData` keeps GNU's per-signal handler-search state:
+
+- `dispatch_signal` (`runtime/eval/signal_dispatch.rs`) walks the condition stack from the top; on a matching `CONDITION_CASE` it stores `selected_resume` and sets `search_complete`, and `dispatch_signal_if_needed` returns the payload **immediately** when `search_complete` is set, so a signal already matched is never walked again.
+
+That state was dropped at the crate's public boundary. `map_flow` (`emacs_core/runtime/error/mod.rs`) converts a `Flow` into the public `EvalError`, and it kept only `symbol`/`data`/`raw_data`; `flow_from_eval_error` rebuilt the payload with `SignalData::new`, whose `search_complete` is `false`. The load path crosses that boundary twice per level, and `with_load_context` (`lisp/load/mod.rs:1769`) does both halves in one expression -- `result.map_err (flow_from_eval_error)` at `:1834`, the `unbind_to_with_result` call, then `.map_err (map_flow)` at `:1836`, so an `EvalError` is rebuilt from a `Flow` that a line earlier was itself rebuilt from an `EvalError`. `eval-buffer` adds a second crossing at `lisp/lread/mod.rs:461`. Each crossing restarted the walk at the top of the condition stack, and every `handler-bind` between the signal and its catcher ran once per crossing. GNU has no such loss: the C `error` object *is* the state, and it crosses a `save-restriction`/`unbind_to` boundary untouched.
+
+The mechanism is what makes the count **grow** with depth rather than stay at a constant 3: a restart at level N re-runs every handler from the top down to that level.
+
+### 5. What was built
+
+`SignalDispatchState` (`emacs_core/runtime/error/mod.rs`), carrying `selected_resume` and `search_complete`, added to both `SignalData` and `EvalError::Signal` and round-tripped by `map_flow`/`flow_from_eval_error`. The two fields were also moved off `SignalData`'s own fields onto this sub-struct so that adding the next piece of search state is a change in one place. `suppress_signal_hook` is deliberately **not** round-tripped: it is consumed by `run_signal_hook` at the signal's origin, and by the time a flow crosses a boundary that hook has already run or been suppressed.
+
+`SignalDispatchState` is public only because it has to travel inside a public enum variant; its fields are `pub(crate)`, and it is built only by `Default`/`searching()`, so the states it can be in stay inside `eval`. `ResumeTarget` itself remains `pub(crate)`.
+
+### 6. Why carrying the token cannot over-deliver
+
+The safety argument is not "GNU does it too"; it is that `selected_resume` is a **token, not a position**. Every consumer compares it for identity against the frames it is about to discard and falls through when it matches nothing:
+
+| consumer | site | no-match behaviour |
+| --- | --- | --- |
+| `sf_condition_case` | `special_forms.rs:1077` | re-signals, propagation continues |
+| VM `resume_nonlocal` | `bytecode/vm.rs:8863` | returns `Err(Flow::Signal(sig))` unchanged |
+| JIT resume shim | `jit/compile/dispatch.rs:3041` | re-stashes the pending flow |
+
+So a stale token degrades to exactly the behaviour that was there before the token was carried -- it cannot deliver to a frame the unwinder would have skipped. The identity check in `sf_condition_case` additionally compares `condition_stack_base`, which is what keeps a token from an outer frame from matching an inner one.
+
+### 7. What was measured
+
+The diagnostic battery, neomacs vs the `PATH` GNU, after the fix. Eight rows;
+`-l` is run at three depths rather than one, so the table is ten runs, and the
+three process-callback probes below it are run separately:
+
+| scenario | rc | blocks | verdict |
+| --- | --- | --- | --- |
+| uncaught top-level error | 255/255 | 1/1 | matches |
+| `backtrace-on-error-noninteractive` nil | 255/255 | 0/0 | matches |
+| `condition-case`-caught | 0/0 | 0/0 | matches |
+| `quit` | 255/255 | 0/0 | matches |
+| `with-demoted-errors` | 0/0 | 0/0 | matches |
+| `-l` depth 1 / 2 / 3 | 255/255 | **1/1** | matches |
+| `--eval '(load ...)'` | 255/255 | 1/1 | matches |
+| `handler-bind` outside the signal | 255/255 | 1/1 | matches |
+
+"blocks" is the count of `Error:` headers on stdout, and it is what this entry
+is about: the count is now 1 at every depth instead of 3/7/9. It is **not** a
+claim that the two backtraces are byte-identical -- they are not, and the
+residual is two separate pre-existing divergences, neither of them signal
+dispatch, both named in "Found and NOT fixed".
+
+Process callbacks, the regression the preceding change fixed: filter, sentinel and timer all still produce **0 bytes** of stdout in both editors, with the message on stderr and matching exit codes -- the sentinel case that had briefly printed a backtrace stays fixed.
+
+`signal-hook-function` is the second thing that rides this mechanism, because
+`run_signal_hook` is called once per `dispatch_signal`, and the re-dispatch was
+re-running it too. Counting only the `error` the probe signals, at depths 1, 2
+and 3:
+
+| depth | neomacs before | neomacs after | GNU |
+| --- | --- | --- | --- |
+| 1 | 3 | **1** | 1 |
+| 2 | 5 | **1** | 1 |
+| 3 | 7 | **1** | 1 |
+
+The "before" column is measured on the stale `/Applications/neomacs.app`
+binary (commit `91e573547`), because the signal hook does **not** depend on the
+`top_level_2` port and so *is* measurable there -- unlike the backtrace count
+above, which is 0 on that binary. The two counters are different probes and
+there was no reason to assume their numbers matched. They do not: the backtrace
+count grew by 2 per level (3/7/9) while the hook count grew by 2 per level from
+a different base (3/5/7). Both are fixed to a flat 1 here, and the fix is the
+same one line of state-carrying in both cases.
+
+**How this was nearly missed, and how it would have been misread.** The first
+version of this probe counted *every* hook call, not just the `error`, and
+returned 6 for neomacs against GNU's 1. That looks like a divergence and is
+not: five of the six are `void-variable` signals this port raises during `load`
+setup (`icon-preference`, `warning-minimum-level`, `warning-minimum-log-level`,
+`warning-suppress-log-types`, `warning-display-at-bottom`), and **GNU raises
+that same class of probe signals during its own `load`** -- a dozen or more,
+for `byte-compile-*` and friends. They are different variable sets because the
+two editors bootstrap differently, and both editors catch them internally and
+print nothing. Filtering by symbol is what makes the probe measure the
+divergence it was written for. A symbol-blind hook counter is not a parity
+probe.
+
+### 8. Gates
+
+- `cargo check --workspace --all-targets` -- exit 0, 0 errors.
+- `cargo fmt --all --check` -- clean on all eleven touched files. Fifteen files elsewhere in the tree carry pre-existing fmt diffs (`neomacs-video`, `dbusbind`, `sys/serial`, ...); none is touched by this change.
+- `cargo xtask fresh-build --release` -- "finished successfully".
+- `cargo test -p neomacs --test batch_startup -- --ignored` -- **5/5**. Four are GNU's own `test/src/eval-tests.el:174-221` cases run against this port; the fifth is new, and pins this entry: one backtrace block at each of depths 1, 2 and 3, because only the pair distinguishes "runs once" from "runs once per level".
+- `cargo xtask gc-stress` -- **9/9**, including probe 03 `signal-re-raised-from-handler` and probe 04 `load-boundary-eval-error`, which are this mechanism exactly. Required by `AGENTS.md` §5 for any evaluator/rooting-boundary change.
+
+### 9. Found and NOT fixed
+
+**Three residual frame-list differences**, all pre-existing, all found while
+checking this fix and none of them caused by it. Two are defects and one is a version
+artifact. They are visible in the same `-l FILE` probe that this entry is
+about, which is exactly why they are easy to mistake for part of it.
+
+The instrument that separates them from this fix is `mapbacktrace`, which reads
+the frame model directly and never touches signal dispatch. It reproduces (a)
+and (c) without signalling anything:
+
+```elisp
+(defun bt2 () (mapbacktrace (lambda (_e f _a _fl) (message "%S" f))))
+(bt2)
+```
+
+loaded from a file, and `-l leaf.el` where `leaf.el` signals.
+
+Run that way, one trace is 7 frames in GNU and 9 here -- the two frame lists
+differ by exactly two entries. GNU:
+
+```text
+mapbacktrace, bt-probe, bt-mid, load-with-code-conversion, command-line-1, command-line, normal-top-level
+```
+
+this port:
+
+```text
+mapbacktrace, bt-probe, bt-mid, eval-buffer, load-with-code-conversion, load, command-line-1, command-line, normal-top-level
+```
+
+which is (a) and (c) and nothing else. No signal is involved, so no part of this
+entry's fix can be responsible.
+
+**(a) One extra `eval-buffer` frame.** GNU does not record a frame for the
+`eval-buffer` that `load-with-code-conversion` calls (`lisp/international/mule.el:367`
+in the 30.2 on `PATH`, `:360` in this tree -- the file shifts by 7 lines
+between the two), while this port does. `mapbacktrace` from inside a
+loaded file shows `... load-with-code-conversion, load, ...` in GNU and
+`... eval-buffer, load-with-code-conversion, load, ...` here. The pre-change
+binary (commit `91e573547`, the stale `/Applications/neomacs.app`) prints the
+same extra frame, so this predates the change. Calling `eval-buffer`
+**directly** in GNU *does* record the frame, so the rule is about the call
+`load-with-code-conversion` makes, not about `eval-buffer` itself -- GNU's
+`readevalloop` reaches the reader without going through `Feval_buffer`, and
+this port routes it through the subr.
+
+**(b) `signal(error (...))` and `error(...)` frames where the `PATH` GNU has
+only `error(...)`.** This is the 31.1 `error`-as-Lisp-function difference
+described in "Hypotheses eliminated" below, not a defect: giving 30.2 the 31.1
+definition of `error` produces the `signal(...)` frame too.
+
+**(c) A `load(...)` frame under `-l FILE` where GNU shows none.** Same probe,
+same cause: `mapbacktrace` run from a file loaded by `-l` shows
+`load-with-code-conversion, command-line-1, ...` in GNU and
+`eval-buffer, load-with-code-conversion, load, command-line-1, ...` here. The
+`-l` route is the only one where this appears -- under `--eval '(load ...)'`
+both editors show the same `load` frame, because there GNU's `load` really is
+on the stack. Under `-l` GNU reaches `load` from `command-line-1` and does not
+record a frame for it, while this port does. Not diagnosed further; like (a) it
+is a frame-recording difference, it predates this change, and the pinned GNU
+31.1 needed to settle it is not installed.
+
+None of the three changes the number of backtrace blocks, which is this entry's
+subject and is now 1 at every depth. (a) and (c) are the same defect seen at two
+stack positions: this port records frames for the `readevalloop` wrappers GNU
+does not, and they are the only two entries by which the two frame lists differ
+once the 31.1 `error` shim explains the third.
+
+`EvalError` is `pub`, and this change added a `pub` field to one of its variants. All construction goes through `EvalError::signal`/`signal_with_dispatch`, and all 55 destructuring sites use `..`, so no call site broke -- but the new field is part of the public shape of the enum for any out-of-tree consumer.
+
+The state is still reset by `signal_from_binding_value` (used by the thread layer to re-raise a stored error), which is correct for a *new* signal but means a thread that catches and re-raises loses its token. Untested, and not known to be reachable from a `load`.
+
+### 10. Hypotheses eliminated
+
+- **"GNU also calls the handler three times, so only the *printing* differs."** No -- and this one was **my own bad measurement**, not a hypothesis about the code. I had copied the log file with `cp` before `cat`-ing it and read neomacs's log twice, in a probe whose whole purpose was to compare the two. Re-run with separate log files, GNU calls it once. The wrong reading survived one round of analysis before the re-measurement killed it, and it had already been written into a status report to the user as fact.
+- **"The extra `signal(...)` frame in neomacs's backtrace is a bug."** No. This port tracks GNU 31.1, where `error` moved from a C subr to `lisp/subr.el`'s `signal` wrapper; the 30.2 on `PATH` legitimately has one frame fewer. Verified by giving 30.2 the 31.1 definition of `error`, which reproduces that frame. It does **not** explain the whole diff -- a second measurement, `diff`-ing the two frame lists, still showed `eval-buffer` and `load` frames this port adds, and those are (a) and (c) under "Found and NOT fixed". An earlier draft of this entry said the 31.1 shim reproduces this port's frames "exactly"; that was written from the single-frame observation and is **wrong**. A byte comparison against `PATH` `emacs` scores the port against the wrong reference -- the failure `neomacs-parity-reference` exists to prevent (ledger 214).
+- **"The `-l` divergence is a `startup.el` difference."** No. `--eval '(load FILE)'` reproduces it identically, so `command-line-1` and the `-l` plumbing are not involved; the trigger is `load` itself.
+- **"`load` re-signals the error at each level."** No -- measured: `signal` is called once. The signal object survives; only the search state was lost.
+- **"`signal-hook-function` runs 6x where GNU runs it once."** No -- the probe was wrong, not the code. A hook that counts *every* call sees five `void-variable` signals this port raises during `load` setup, and GNU raises its own dozen of that same class; filtering the count to the symbol the probe actually signals turns 6-vs-1 into 1-vs-1. This one is worth recording because the raw number looked like a clean, damning divergence and was instead a probe measuring the wrong population.
+- **"The signal-hook 'before' numbers match the backtrace 'before' numbers."** No -- assumed, then measured, and wrong: the backtrace count was 3/7/9 and the hook count 3/5/7 on two different binaries. They are two probes over the same mechanism and there was no reason for their counts to agree; the ledger records both rather than one derived from the other.
