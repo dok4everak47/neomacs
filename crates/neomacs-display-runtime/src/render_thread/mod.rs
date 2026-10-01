@@ -33,6 +33,8 @@ mod surface_readback;
 mod terminal_commands;
 #[cfg(feature = "neo-term")]
 mod terminal_expansion;
+#[cfg(feature = "neo-term")]
+mod terminal_pointer;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

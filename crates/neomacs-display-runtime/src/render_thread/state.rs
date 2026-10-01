@@ -958,6 +958,20 @@ pub(super) struct RenderApp {
     pub(super) terminal_manager: crate::terminal::TerminalManager,
     #[cfg(feature = "neo-term")]
     pub(super) shared_terminals: crate::terminal::SharedTerminals,
+    /// Button currently held over a mouse-reporting terminal, recorded so a
+    /// later motion event can carry the button code the child expects.
+    #[cfg(feature = "neo-term")]
+    pub(super) terminal_mouse_button: Option<crate::terminal::mouse::MouseButton>,
+    /// Last `(terminal, col, row)` a motion report reached, so pixel movement
+    /// inside one character cell does not repeat the same report (xterm
+    /// `src/button.c:5591-5600`). The id keeps two terminals from aliasing.
+    #[cfg(feature = "neo-term")]
+    pub(super) terminal_mouse_cell: Option<(crate::terminal::TerminalId, usize, usize)>,
+    /// Terminal whose local selection a held primary button is dragging, and
+    /// the `(col, row)` the pointer last landed on. `Some` means motion is
+    /// turned into selection updates instead of child mouse reports.
+    #[cfg(feature = "neo-term")]
+    pub(super) terminal_drag: Option<(crate::terminal::TerminalId, usize, usize)>,
 
     pub(super) frame_windows: GuiFrameWindowManager,
     /// Latest child snapshots whose immediate ancestry has not been presented
@@ -1164,6 +1178,12 @@ impl RenderApp {
             terminal_manager: crate::terminal::TerminalManager::new(),
             #[cfg(feature = "neo-term")]
             shared_terminals,
+            #[cfg(feature = "neo-term")]
+            terminal_mouse_button: None,
+            #[cfg(feature = "neo-term")]
+            terminal_mouse_cell: None,
+            #[cfg(feature = "neo-term")]
+            terminal_drag: None,
             frame_windows,
             pending_child_frames: HashMap::new(),
             frame_preparation: None,

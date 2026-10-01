@@ -5,6 +5,8 @@
 
 pub mod colors;
 pub mod content;
+pub mod mouse;
+pub mod selection;
 pub mod view;
 
 pub use content::TerminalContent;
@@ -233,3 +235,7 @@ impl SharedTerminals {
 #[cfg(test)]
 #[path = "tests/registry_test.rs"]
 mod registry_tests;
+
+#[cfg(test)]
+#[path = "tests/selection_test.rs"]
+mod selection_tests;

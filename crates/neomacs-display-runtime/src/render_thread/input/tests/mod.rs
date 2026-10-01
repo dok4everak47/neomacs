@@ -283,6 +283,26 @@ fn wheel_input_atomically_carries_its_presented_region() {
     assert!(emacs.input_rx.try_recv().is_err());
 }
 
+#[cfg(feature = "neo-term")]
+#[test]
+fn a_release_clears_the_held_terminal_button() {
+    let mut app = make_test_app_with_input(200, 100, 1.0).0;
+    let window_id = winit::window::WindowId::from_raw(1);
+    app.frame_windows.primary_winit_id = Some(window_id);
+
+    app.terminal_mouse_button = Some(crate::terminal::mouse::MouseButton::Left);
+    app.terminal_mouse_cell = Some((crate::terminal::TerminalId::new(1).unwrap(), 3, 4));
+
+    app.handle_mouse_input(
+        window_id,
+        winit::event::ElementState::Released,
+        winit::event::MouseButton::Left,
+    );
+
+    assert!(app.terminal_mouse_button.is_none());
+    assert!(app.terminal_mouse_cell.is_none());
+}
+
 fn presented_pointer_integration_relief(pressed: bool) -> PointerImageRelief {
     let light = Color::new(0.85, 0.85, 0.85, 1.0);
     let dark = Color::new(0.25, 0.25, 0.25, 1.0);

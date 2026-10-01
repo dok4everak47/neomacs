@@ -252,6 +252,7 @@ fn semantics(event: &InputEvent) -> FrontendEventSemantics {
         | InputEvent::TerminalCreateFailed { .. }
         | InputEvent::TerminalExited { .. }
         | InputEvent::TerminalTitleChanged { .. }
+        | InputEvent::TerminalSelection { .. }
         | InputEvent::SystemFontsChanged { .. } => ServiceDuringWait,
         InputEvent::Focus { focused, .. } => special_input(
             PendingInputPolicy::Focus { focused: *focused },

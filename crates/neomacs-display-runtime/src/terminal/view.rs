@@ -13,11 +13,13 @@ use parking_lot::{FairMutex, Mutex};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use rio_vt::ansi::CursorShape;
+use rio_vt::crosswords::pos::Side;
 use rio_vt::crosswords::{Crosswords, CrosswordsSize};
 use rio_vt::event::{EventListener, RioEvent, WindowId};
 use rio_vt::performer::handler::Processor;
 
 use super::content::TerminalContent;
+use super::selection::{pos_of, simple_selection};
 use super::{TerminalDisplayTarget, TerminalGridSize, TerminalId};
 
 /// Scrollback history limit, matching the previous emulator default.
@@ -132,6 +134,27 @@ pub struct TerminalView {
     pub float_x: f32,
     pub float_y: f32,
     pub float_opacity: f32,
+    /// Test-only PTY sink backing [`Self::for_test`], drained by
+    /// [`Self::take_written_for_test`]. Empty for terminals with a real PTY.
+    #[cfg(all(test, feature = "neo-term"))]
+    written: Arc<Mutex<Vec<u8>>>,
+}
+
+/// A test PTY writer that appends every byte to a shared buffer instead of an
+/// OS pipe.
+#[cfg(all(test, feature = "neo-term"))]
+struct TestWriter(Arc<Mutex<Vec<u8>>>);
+
+#[cfg(all(test, feature = "neo-term"))]
+impl Write for TestWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 struct PtySession {
@@ -357,12 +380,104 @@ impl TerminalView {
             float_x: 0.0,
             float_y: 0.0,
             float_opacity: 1.0,
+            #[cfg(all(test, feature = "neo-term"))]
+            written: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Build a terminal that owns no OS resources and records what would be
+    /// written to its PTY, so pointer reporting can be asserted byte for byte.
+    #[cfg(all(test, feature = "neo-term"))]
+    pub fn for_test(
+        id: TerminalId,
+        size: TerminalGridSize,
+        target: TerminalDisplayTarget,
+        written: Arc<Mutex<Vec<u8>>>,
+    ) -> Self {
+        let event_proxy = NeomacsEventProxy::new(id);
+        let cols = size.cols.get();
+        let rows = size.rows.get();
+        let grid_size = CrosswordsSize::new(cols.max(1) as usize, rows.max(1) as usize);
+        let term = Crosswords::new(
+            grid_size,
+            CursorShape::Block,
+            event_proxy.clone(),
+            WindowId::from(0),
+            0,
+            SCROLLBACK_HISTORY,
+        );
+        let term = Arc::new(FairMutex::new(term));
+        let sink = Arc::clone(&written);
+        Self {
+            id,
+            target,
+            term,
+            event_proxy,
+            pty_session: PtySession {
+                master: None,
+                child: None,
+                writer: Some(Arc::new(Mutex::new(Box::new(TestWriter(written))))),
+                reader_thread: None,
+            },
+            last_content: None,
+            dirty: true,
+            exit_notified: false,
+            float_x: 0.0,
+            float_y: 0.0,
+            float_opacity: 1.0,
+            written: sink,
+        }
+    }
+
+    /// Advance the terminal parser by `bytes`, as the PTY reader thread would.
+    #[cfg(all(test, feature = "neo-term"))]
+    pub fn feed_for_test(&mut self, bytes: &[u8]) {
+        let mut processor = Processor::default();
+        let mut term = self.term.lock();
+        processor.advance(&mut *term, bytes);
+    }
+
+    /// Drain and return everything written to this terminal's test PTY sink.
+    #[cfg(all(test, feature = "neo-term"))]
+    pub fn take_written_for_test(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.written.lock())
+    }
+
+    /// Whether the child has asked for any mouse reporting at all.
+    #[cfg(all(test, feature = "neo-term"))]
+    pub fn reports_for_test(&self) -> bool {
+        self.mouse_protocol().reports()
     }
 
     /// Write input data to the terminal's PTY (keyboard input from user).
     pub fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
         self.pty_session.write(data)
+    }
+
+    /// Snapshot the child's current mouse-reporting request.
+    pub fn mouse_protocol(&self) -> super::mouse::MouseProtocol {
+        let term = self.term.lock();
+        super::mouse::MouseProtocol::from_mode(term.mode())
+    }
+
+    /// Forward one pointer event to the child if it has enabled a matching
+    /// mouse-reporting mode. Returns `true` when the event was reported — the
+    /// caller should then stop treating it as an editor event.
+    pub fn report_mouse(
+        &self,
+        action: super::mouse::MouseAction,
+        button: Option<super::mouse::MouseButton>,
+        col: usize,
+        row: usize,
+        modifiers: super::mouse::MouseModifiers,
+    ) -> std::io::Result<bool> {
+        let protocol = self.mouse_protocol();
+        let Some(encoded) = super::mouse::encode(protocol, action, button, col, row, modifiers)
+        else {
+            return Ok(false);
+        };
+        self.pty_session.write(&encoded)?;
+        Ok(true)
     }
 
     /// Resize the terminal grid and PTY.
@@ -421,6 +536,46 @@ impl TerminalView {
         let cols = term.columns();
         let rows = term.screen_lines();
         super::content::extract_text(&*term, 0, 0, rows.saturating_sub(1), cols.saturating_sub(1))
+    }
+
+    /// Anchor a fresh simple selection at `(row, col)`.
+    ///
+    /// The anchor is the left/top end, so it takes [`Side::Left`]. The
+    /// moving end in [`Self::update_selection`] takes [`Side::Right`]; that
+    /// pairing keeps the cell under the pointer inside the selection (rio-vt
+    /// trims an end whose side is `Left`). Marking the terminal dirty makes
+    /// the highlight repaint on the next frame.
+    pub fn begin_selection(&mut self, row: usize, col: usize) {
+        let mut term = self.term.lock();
+        term.selection = Some(simple_selection(row, col, Side::Left));
+        drop(term);
+        self.dirty = true;
+    }
+
+    /// Move the free end of an in-progress selection to `(row, col)`.
+    pub fn update_selection(&mut self, row: usize, col: usize) {
+        let mut term = self.term.lock();
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(pos_of(row, col), Side::Right);
+        }
+        drop(term);
+        self.dirty = true;
+    }
+
+    /// Drop any selection and repaint the affected cells.
+    pub fn clear_selection(&mut self) {
+        let mut term = self.term.lock();
+        let had_selection = term.selection.take().is_some();
+        drop(term);
+        if had_selection {
+            self.dirty = true;
+        }
+    }
+
+    /// The selected text, if a non-empty selection exists.
+    pub fn selected_text(&self) -> Option<String> {
+        let term = self.term.lock();
+        term.selection_to_string()
     }
 
     /// Terminate and reap the PTY child, close all master handles, and join

@@ -7,7 +7,7 @@
 use super::colors::ansi_to_color;
 use crate::core::types::Color;
 use rio_vt::config::colors::{AnsiColor, ColorRgb, NamedColor};
-use rio_vt::crosswords::pos::{Column, Line};
+use rio_vt::crosswords::pos::{Column, Line, Pos};
 use rio_vt::crosswords::square::{ContentTag, Square, Wide};
 use rio_vt::crosswords::style::{Style, StyleFlags as CellFlags};
 use rio_vt::crosswords::{Crosswords, Mode};
@@ -54,6 +54,10 @@ pub struct TerminalContent {
     pub default_fg: Color,
 }
 
+/// Background painted under a selected cell. Chosen to stand out from both the
+/// default black background and typical ANSI cell backgrounds.
+pub const SELECTION_BG: Color = Color::new(0.20, 0.35, 0.65, 1.0);
+
 /// Resolve a square's fg color, bg color, and style flags. Squares store a
 /// packed style id (or a bg-only fast path) rather than inline colors, so
 /// the per-grid style table is consulted for full styling.
@@ -88,6 +92,12 @@ impl TerminalContent {
         let num_cols = term.columns();
         let num_lines = term.screen_lines();
         let styles = term.grid.style_set.styles();
+        // Snapshot the selection once; the per-cell test below is a range
+        // lookup rather than a second walk of the terminal state.
+        let selection_range = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(term));
 
         let default_fg = Color::WHITE;
         let default_bg = Color::BLACK;
@@ -111,7 +121,12 @@ impl TerminalContent {
 
                 let (sq_fg, sq_bg, flags) = square_style(square, styles);
                 let fg = ansi_to_color(&sq_fg, &default_fg, &default_bg);
-                let bg = ansi_to_color(&sq_bg, &default_fg, &default_bg);
+                let mut bg = ansi_to_color(&sq_bg, &default_fg, &default_bg);
+                if selection_range.as_ref().is_some_and(|range| {
+                    range.contains(Pos::new(Line(row_idx as i32), Column(col_idx)))
+                }) {
+                    bg = SELECTION_BG;
+                }
 
                 cells.push(RenderCell {
                     col: col_idx,

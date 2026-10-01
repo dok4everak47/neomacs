@@ -113,6 +113,36 @@ impl RenderApp {
         }
     }
 
+    /// Pointer-button delivery for a primary pointer, in the order the terminal
+    /// protocol needs: a released button is dropped before the move is
+    /// processed, so the child never sees a drag at the release position ahead
+    /// of the release itself.
+    ///
+    /// Split out from `handle_window_event` so the ordering is reachable by a
+    /// test without a live `ActiveEventLoop`.
+    pub(super) fn dispatch_primary_pointer_button(
+        &mut self,
+        window_id: WindowId,
+        state: ElementState,
+        button: winit::event::ButtonSource,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) {
+        // A released button must not first encode a drag motion: the
+        // child would see a drag at the release position before the
+        // release itself. Drop the held button before the move, but
+        // keep `terminal_mouse_cell` so a repeat of the last motion
+        // cell is still suppressed (a mode-1003 bare motion at the
+        // release position would otherwise slip out).
+        #[cfg(feature = "neo-term")]
+        if state == ElementState::Released {
+            self.terminal_mouse_button = None;
+        }
+        self.handle_cursor_moved(window_id, position);
+        if let Some(button) = button.mouse_button() {
+            self.handle_mouse_input(window_id, state, button);
+        }
+    }
+
     pub(super) fn handle_window_event(
         &mut self,
         event_loop: &dyn ActiveEventLoop,
@@ -507,10 +537,7 @@ impl RenderApp {
                 ..
             } => {
                 if primary {
-                    self.handle_cursor_moved(window_id, position);
-                    if let Some(button) = button.mouse_button() {
-                        self.handle_mouse_input(window_id, state, button);
-                    }
+                    self.dispatch_primary_pointer_button(window_id, state, button, position);
                 }
             }
 
@@ -781,3 +808,7 @@ impl RenderApp {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "window_events/tests/mod.rs"]
+mod tests;

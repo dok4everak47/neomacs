@@ -202,6 +202,12 @@ pub enum InputEvent {
         id: crate::terminal::TerminalId,
         title: String,
     },
+    /// The user drag-selected text in a terminal and released the button.
+    #[cfg(feature = "neo-term")]
+    TerminalSelection {
+        id: crate::terminal::TerminalId,
+        text: String,
+    },
     /// Popup menu selection made (index into menu items, -1 = cancelled)
     MenuSelection {
         index: i32,
@@ -1164,6 +1170,8 @@ impl RenderComms {
             InputEvent::TerminalExited { .. } => "terminal-exited",
             #[cfg(feature = "neo-term")]
             InputEvent::TerminalTitleChanged { .. } => "terminal-title-changed",
+            #[cfg(feature = "neo-term")]
+            InputEvent::TerminalSelection { .. } => "terminal-selection",
         }
     }
 

@@ -1433,6 +1433,12 @@ pub enum InputEvent {
         id: crate::emacs_core::display_host::TerminalId,
         title: String,
     },
+    /// The user drag-selected text in a compositor-owned neo-term and
+    /// released the primary button.
+    TerminalSelection {
+        id: crate::emacs_core::display_host::TerminalId,
+        text: String,
+    },
 }
 
 impl InputEvent {
@@ -4186,6 +4192,9 @@ impl crate::emacs_core::eval::Context {
                 InputEvent::TerminalTitleChanged { id, title } => {
                     self.handle_terminal_title_changed_input_event(id, &title)?;
                 }
+                InputEvent::TerminalSelection { id, text } => {
+                    self.handle_terminal_selection_input_event(id, &text)?;
+                }
                 _ => {}
             }
         }
@@ -4308,6 +4317,19 @@ impl crate::emacs_core::eval::Context {
             Value::symbol("neo-term-title-changed-functions"),
             Value::fixnum(i64::from(id.get())),
             Value::string(title),
+        ];
+        crate::emacs_core::hook_runtime::run_named_hook_with_args(self, &args)
+    }
+
+    fn handle_terminal_selection_input_event(
+        &mut self,
+        id: crate::emacs_core::display_host::TerminalId,
+        text: &str,
+    ) -> crate::emacs_core::error::EvalResult {
+        let args = [
+            Value::symbol("neo-term-selection-functions"),
+            Value::fixnum(i64::from(id.get())),
+            Value::string(text),
         ];
         crate::emacs_core::hook_runtime::run_named_hook_with_args(self, &args)
     }
@@ -5231,6 +5253,10 @@ impl crate::emacs_core::eval::Context {
             }
             InputEvent::TerminalTitleChanged { id, title } => {
                 self.handle_terminal_title_changed_input_event(id, &title)?;
+                Ok(None)
+            }
+            InputEvent::TerminalSelection { id, text } => {
+                self.handle_terminal_selection_input_event(id, &text)?;
                 Ok(None)
             }
             InputEvent::Focus {

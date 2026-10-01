@@ -507,6 +507,11 @@ fn convert_single_display_event(event: &DisplayEvent) -> Option<KbInputEvent> {
                 title: title.clone(),
             })
         }
+        #[cfg(feature = "neo-term")]
+        DisplayEvent::TerminalSelection { id, text } => Some(KbInputEvent::TerminalSelection {
+            id: *id,
+            text: text.clone(),
+        }),
     }
 }
 

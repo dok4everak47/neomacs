@@ -144,6 +144,10 @@ Returns terminal ID or nil on failure."
 (define-derived-mode neo-term-mode fundamental-mode "NeoTerm"
   "Major mode for neo-term GPU terminal buffers.
 
+Drag with the mouse (or hold Shift over a program that reports mouse
+events) to select text; releasing the button copies the selection to the
+kill ring.
+
 \\{neo-term-mode-map}"
   :group 'neo-term
   (setq-local buffer-read-only t)
@@ -295,6 +299,12 @@ Returns terminal ID or nil on failure."
                  (eql neo-term--id terminal-id))
         (rename-buffer (format "*neo-term: %s*" title) t)))))
 
+(defun neo-term--handle-selection (terminal-id text)
+  "Copy drag-selected TEXT from TERMINAL-ID to the kill ring."
+  (ignore terminal-id)
+  (when (and (stringp text) (> (length text) 0))
+    (kill-new text)))
+
 (defvar neo-term-exit-functions nil
   "Functions called with a terminal ID after its child process exits.")
 
@@ -304,9 +314,13 @@ Returns terminal ID or nil on failure."
 (defvar neo-term-title-changed-functions nil
   "Functions called with a terminal ID and its new title.")
 
+(defvar neo-term-selection-functions nil
+  "Functions called with a terminal ID and its drag-selected text.")
+
 (add-hook 'neo-term-exit-functions #'neo-term--handle-exit)
 (add-hook 'neo-term-create-failed-functions #'neo-term--handle-create-failed)
 (add-hook 'neo-term-title-changed-functions #'neo-term--handle-title-changed)
+(add-hook 'neo-term-selection-functions #'neo-term--handle-selection)
 
 ;;; Public API
 

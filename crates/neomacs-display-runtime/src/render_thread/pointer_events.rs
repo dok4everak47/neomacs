@@ -955,6 +955,24 @@ impl RenderApp {
         }
     }
 
+    /// Finish a drag-selection the pointer release ended: read its text,
+    /// drop the highlight, and hand the text to Emacs. Nothing is sent when
+    /// the selection extracted no text.
+    #[cfg(feature = "neo-term")]
+    fn finalize_terminal_selection(&mut self, drag_id: crate::terminal::TerminalId) {
+        let text = self
+            .terminal_manager
+            .get(drag_id)
+            .and_then(|view| view.selected_text());
+        if let Some(view) = self.terminal_manager.get_mut(drag_id) {
+            view.clear_selection();
+        }
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            self.comms
+                .send_input(InputEvent::TerminalSelection { id: drag_id, text });
+        }
+    }
+
     pub(super) fn handle_mouse_input(
         &mut self,
         window_id: WindowId,
@@ -962,6 +980,25 @@ impl RenderApp {
         button: MouseButton,
     ) {
         self.record_idle_dim_activity(window_id);
+        // Any release ends a terminal drag, even one that lands outside the
+        // terminal or over chrome: a stale drag would otherwise keep eating
+        // motion and suppressing child reports. A held reporting button is
+        // dropped with it so later hover cannot turn into phantom reports.
+        #[cfg(feature = "neo-term")]
+        let terminal_selection_release = {
+            let mut releasing = false;
+            if state == ElementState::Released {
+                self.terminal_mouse_button = None;
+                self.terminal_mouse_cell = None;
+                if button == MouseButton::Left
+                    && let Some(drag_id) = self.terminal_drag.take().map(|(id, _, _)| id)
+                {
+                    self.finalize_terminal_selection(drag_id);
+                    releasing = true;
+                }
+            }
+            releasing
+        };
         #[cfg(feature = "webview")]
         let captured_release = if state == ElementState::Released {
             self.webview_pointer_capture.take()
@@ -1209,6 +1246,86 @@ impl RenderApp {
                     // Chrome consumed the click/release; do not also deliver it
                     // as a buffer mouse event.
                 } else {
+                    // A Window-target terminal gets the protocol bytes its child
+                    // asked for, unless a local selection owns the gesture. This
+                    // is additive: the event below still reaches Emacs, so window
+                    // selection and buffer pointer handling are unchanged.
+                    #[cfg(feature = "neo-term")]
+                    {
+                        let terminal_button = super::terminal_pointer::mouse_button(button);
+                        let target = pointer_owner
+                            .raw_target()
+                            .filter(|(_, _, fid)| *fid == window_state.render.emacs_frame_id);
+                        let frame = window_state.render.compositor.current_frame.as_ref();
+                        let cell = match (target, frame) {
+                            (Some((tx, ty, _)), Some(frame)) => {
+                                super::terminal_pointer::terminal_cell_at(
+                                    &self.terminal_manager,
+                                    frame,
+                                    tx,
+                                    ty,
+                                )
+                            }
+                            _ => None,
+                        };
+                        // Holding Shift selects locally even when the child
+                        // asked for mouse reports. This is xterm's
+                        // `shiftEscape` escape hatch and the same override GNU
+                        // terminals expose, so a reporting program can never
+                        // take the selection away from the user.
+                        let shift_held =
+                            self.modifiers & crate::backend::wgpu::NEOMACS_SHIFT_MASK != 0;
+                        let reports = cell
+                            .and_then(|(id, _, _)| self.terminal_manager.get(id))
+                            .is_some_and(|view| view.mouse_protocol().reports());
+                        if state == ElementState::Pressed
+                            && button == MouseButton::Left
+                            && (shift_held || !reports)
+                        {
+                            if let Some((id, col, row)) = cell {
+                                if let Some(view) = self.terminal_manager.get_mut(id) {
+                                    view.begin_selection(row, col);
+                                }
+                                self.terminal_drag = Some((id, col, row));
+                            }
+                        } else if !terminal_selection_release
+                            && let Some((tx, ty, _)) = target
+                            && let Some(frame) = frame
+                        {
+                            let action = if state == ElementState::Pressed {
+                                crate::terminal::mouse::MouseAction::Press
+                            } else {
+                                crate::terminal::mouse::MouseAction::Release
+                            };
+                            let reported = super::terminal_pointer::report_terminal_mouse(
+                                &self.terminal_manager,
+                                frame,
+                                tx,
+                                ty,
+                                action,
+                                terminal_button,
+                                super::terminal_pointer::mouse_modifiers(self.modifiers),
+                                None,
+                            );
+                            if let Some(cell) = reported {
+                                match action {
+                                    crate::terminal::mouse::MouseAction::Press => {
+                                        if let Some(terminal_button) = terminal_button {
+                                            self.terminal_mouse_button = Some(terminal_button);
+                                        }
+                                        // The press's own cell is now the last
+                                        // one reported, so holding still is
+                                        // silent.
+                                        self.terminal_mouse_cell = Some(cell);
+                                    }
+                                    _ => {
+                                        self.terminal_mouse_button = None;
+                                        self.terminal_mouse_cell = None;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let btn = match button {
                         MouseButton::Left => 1,
                         MouseButton::Middle => 2,
@@ -1399,6 +1516,55 @@ impl RenderApp {
             window_state.render.set_mouse_pos((lx, ly));
             let mut dirty = false;
             let pointer_owner = Self::pointer_owner(window_state, lx, ly);
+            // A local drag owns motion: it extends the selection and sends the
+            // child nothing. The drag only exists when the child is not
+            // reporting or Shift overrode reporting, so suppressing the report
+            // here is exactly the press decision.
+            #[cfg(feature = "neo-term")]
+            let terminal_drag_active = if let Some((drag_id, _, _)) = self.terminal_drag {
+                if let Some((mx, my, mf)) = pointer_owner.raw_target()
+                    && mf == window_state.render.emacs_frame_id
+                    && let Some(frame) = window_state.render.compositor.current_frame.as_ref()
+                    && let Some((id, col, row)) = super::terminal_pointer::terminal_cell_at(
+                        &self.terminal_manager,
+                        frame,
+                        mx,
+                        my,
+                    )
+                    && id == drag_id
+                {
+                    if let Some(view) = self.terminal_manager.get_mut(id) {
+                        view.update_selection(row, col);
+                    }
+                    self.terminal_drag = Some((id, col, row));
+                }
+                true
+            } else {
+                false
+            };
+            // Motion for a terminal that asked for it. `terminal_mouse_button`
+            // is whatever a press over a reporting terminal recorded; with no
+            // button held, only mode 1003 (report all motion) produces bytes.
+            // `terminal_mouse_cell` suppresses a repeat while the pointer stays
+            // inside the same character cell.
+            #[cfg(feature = "neo-term")]
+            if !terminal_drag_active
+                && let Some((mx, my, mf)) = pointer_owner.raw_target()
+                && mf == window_state.render.emacs_frame_id
+                && let Some(frame) = window_state.render.compositor.current_frame.as_ref()
+                && let Some(cell) = super::terminal_pointer::report_terminal_mouse(
+                    &self.terminal_manager,
+                    frame,
+                    mx,
+                    my,
+                    crate::terminal::mouse::MouseAction::Motion,
+                    self.terminal_mouse_button,
+                    super::terminal_pointer::mouse_modifiers(modifiers),
+                    self.terminal_mouse_cell,
+                )
+            {
+                self.terminal_mouse_cell = Some(cell);
+            }
             if !pointer_owner.owns_root_hover() {
                 dirty |= Self::suppress_root_chrome_hover(&mut window_state.render);
             }
@@ -1687,6 +1853,46 @@ impl RenderApp {
                     window_state.render.mouse_pos.1,
                 )
             });
+            // Wheel over a reporting terminal goes to the child as well as to
+            // Emacs, for the same reason the buttons do (see the button path).
+            #[cfg(feature = "neo-term")]
+            if target_fid == window_state.render.emacs_frame_id
+                && let Some(frame) = window_state.render.compositor.current_frame.as_ref()
+            {
+                use crate::terminal::mouse::MouseButton;
+                use crate::thread_comm::ScrollDelta as Delta;
+                let (dx, dy) = match delta {
+                    Delta::Lines { x, y } | Delta::Pixels { x, y } => (x, y),
+                };
+                // Positive winit Y scrolls away from the user, i.e. wheel-up.
+                let wheel = if dy != 0.0 && dy.abs() >= dx.abs() {
+                    Some(if dy > 0.0 {
+                        MouseButton::WheelUp
+                    } else {
+                        MouseButton::WheelDown
+                    })
+                } else if dx != 0.0 {
+                    Some(if dx > 0.0 {
+                        MouseButton::WheelRight
+                    } else {
+                        MouseButton::WheelLeft
+                    })
+                } else {
+                    None
+                };
+                if let Some(wheel) = wheel {
+                    super::terminal_pointer::report_terminal_mouse(
+                        &self.terminal_manager,
+                        frame,
+                        ev_x,
+                        ev_y,
+                        crate::terminal::mouse::MouseAction::Press,
+                        Some(wheel),
+                        super::terminal_pointer::mouse_modifiers(self.modifiers),
+                        None,
+                    );
+                }
+            }
             #[cfg(feature = "webview")]
             let webview_delivery =
                 Self::webview_target_for_frame_window(&window_state.render, target_fid, ev_x, ev_y)

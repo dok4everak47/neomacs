@@ -222,7 +222,7 @@ impl RenderApp {
     }
 
     #[cfg(feature = "neo-term")]
-    fn window_text_body(info: &crate::core::frame_glyphs::WindowInfo) -> Rect {
+    pub(super) fn window_text_body(info: &crate::core::frame_glyphs::WindowInfo) -> Rect {
         match info.geometry {
             neomacs_display_protocol::PresentedWindowGeometry::Complete { regions, .. } => {
                 regions.text_body
