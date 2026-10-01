@@ -570,3 +570,65 @@ fn treesit_linecol_at_rejects_markers_like_gnu() {
     );
     assert_eq!(sig.data, vec![Value::symbol("numberp"), marker]);
 }
+
+fn treesit_test_home_dir() -> String {
+    let home = std::env::var("HOME").expect("HOME is set for the treesit path test");
+    home.trim_end_matches('/').to_owned()
+}
+
+/// GNU passes `user-emacs-directory` through `expand-file-name`, so a literal
+/// "~/.emacs.d/" must yield an absolute library candidate (GNU src/treesit.c:685).
+/// This test is independent of whether a real grammar is installed.
+#[test]
+fn treesit_candidate_paths_expands_tilde_in_user_emacs_directory() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = super::super::eval::Context::new();
+    eval.eval_str("(setq user-emacs-directory \"~/neomacs-treesit-expand/user-emacs-dir/\")")
+        .expect("bind user-emacs-directory");
+    eval.eval_str("(setq treesit-extra-load-path nil)")
+        .expect("disable treesit-extra-load-path");
+
+    let language = Value::symbol("python")
+        .as_symbol_id()
+        .expect("python symbol");
+    let home = treesit_test_home_dir();
+    let candidates = treesit_candidate_paths(&eval, language);
+
+    assert!(
+        candidates.iter().any(|path| path.starts_with(&home)
+            && path.contains("neomacs-treesit-expand/user-emacs-dir/tree-sitter/")),
+        "`~` in user-emacs-directory must expand to an absolute HOME path: {candidates:?}"
+    );
+    assert!(
+        candidates.iter().all(|path| !path.starts_with('~')),
+        "no candidate may keep a literal leading `~`: {candidates:?}"
+    );
+}
+
+/// GNU expands each `treesit-extra-load-path` entry as the default directory
+/// (GNU src/treesit.c:696), so "~"-relative entries must also become absolute.
+#[test]
+fn treesit_candidate_paths_expands_tilde_in_extra_load_path() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = super::super::eval::Context::new();
+    eval.eval_str("(setq user-emacs-directory \"/nonexistent-user-emacs-dir/\")")
+        .expect("point user-emacs-directory away from the test");
+    eval.eval_str("(setq treesit-extra-load-path '(\"~/neomacs-treesit-expand/extra-dir\"))")
+        .expect("bind treesit-extra-load-path");
+
+    let language = Value::symbol("python")
+        .as_symbol_id()
+        .expect("python symbol");
+    let home = treesit_test_home_dir();
+    let candidates = treesit_candidate_paths(&eval, language);
+
+    assert!(
+        candidates.iter().any(|path| path.starts_with(&home)
+            && path.contains("neomacs-treesit-expand/extra-dir/libtree-sitter")),
+        "`~` in treesit-extra-load-path must expand to an absolute HOME path: {candidates:?}"
+    );
+    assert!(
+        candidates.iter().all(|path| !path.starts_with('~')),
+        "no candidate may keep a literal leading `~`: {candidates:?}"
+    );
+}

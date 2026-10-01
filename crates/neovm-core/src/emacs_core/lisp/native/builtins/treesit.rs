@@ -390,6 +390,10 @@ fn treesit_override_names(
 fn treesit_user_emacs_dir(eval: &super::eval::Context) -> Option<String> {
     super::misc_eval::dynamic_or_global_symbol_value(eval, "user-emacs-directory")
         .and_then(|value| value.as_str_owned())
+        // GNU expands the directory before joining the `tree-sitter` subdir, so a
+        // literal "~/.emacs.d/" must become an absolute path here (GNU src/treesit.c:685
+        // passes user-emacs-directory as the default dir to Fexpand_file_name).
+        .map(|dir| crate::emacs_core::fileio::expand_file_name(&dir, None))
 }
 
 fn treesit_candidate_paths(eval: &super::eval::Context, language: SymId) -> Vec<String> {
@@ -420,6 +424,9 @@ fn treesit_candidate_paths(eval: &super::eval::Context, language: SymId) -> Vec<
         eval,
         "treesit-extra-load-path",
     )) {
+        // GNU expands each extra load path entry too (GNU src/treesit.c:696), so
+        // "~"-relative entries resolve to the user's home instead of failing to dlopen.
+        let dir = crate::emacs_core::fileio::expand_file_name(&dir, None);
         let base = Path::new(&dir).join(&lib_base_name);
         let base = base.to_string_lossy().into_owned();
         for suffix in default_dynamic_library_suffixes() {
