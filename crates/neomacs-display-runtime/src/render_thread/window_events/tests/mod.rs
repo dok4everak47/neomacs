@@ -72,6 +72,9 @@ fn install_window_terminal(app: &mut RenderApp, id: TerminalId, mouse_mode: Opti
     if let Some(mode) = mouse_mode {
         view.feed_for_test(mode);
     }
+    // Populate `content()`; the grid size it exposes (cols/rows) is what a
+    // clamped off-grid drag clamps into.
+    view.update_content();
     app.terminal_manager.terminals.insert(id, view);
 
     let mut frame = FrameGlyphBuffer::with_size(200.0, 100.0);
@@ -381,5 +384,149 @@ fn shift_over_a_reporting_terminal_selects_instead_of_reporting() {
         app.terminal_drag,
         Some((id, 0, 0)),
         "Shift starts a local selection drag at the pressed cell"
+    );
+}
+
+#[test]
+fn a_drag_past_the_right_edge_extends_to_the_last_column() {
+    let (mut app, emacs) = make_test_app_with_comms(200, 100, 1.0);
+    let window_id = WindowId::from_raw(1);
+    app.frame_windows.primary_winit_id = Some(window_id);
+
+    let id = TerminalId::new(12).unwrap();
+    install_window_terminal(&mut app, id, None);
+
+    // Press the left edge of "hello", then move far past the right edge of the
+    // 20-column grid (which ends at x = 160). Releasing at the same point keeps
+    // the finalize path on the clamped cell too.
+    app.dispatch_primary_pointer_button(
+        window_id,
+        ElementState::Pressed,
+        MouseButton::Left.into(),
+        PhysicalPosition::new(4.0, 8.0),
+    );
+    app.handle_cursor_moved(window_id, PhysicalPosition::new(1000.0, 8.0));
+    app.dispatch_primary_pointer_button(
+        window_id,
+        ElementState::Released,
+        MouseButton::Left.into(),
+        PhysicalPosition::new(1000.0, 8.0),
+    );
+
+    let text = match terminal_selection(drain_input_events(&emacs)) {
+        Some((selected_id, text)) => {
+            assert_eq!(selected_id, id);
+            text
+        }
+        None => panic!("a drag that leaves the grid must still push its selection"),
+    };
+    assert_eq!(
+        text.trim_end(),
+        "hello",
+        "the drag must extend to the last column, not stop mid-line: {text:?}"
+    );
+}
+
+#[test]
+fn shift_suppresses_motion_reports_even_outside_a_drag() {
+    let mut app = make_test_app(200, 100, 1.0);
+    let window_id = WindowId::from_raw(1);
+    app.frame_windows.primary_winit_id = Some(window_id);
+
+    let id = TerminalId::new(13).unwrap();
+    // Mode 1003 reports bare motion, so a leaked hover would be visible.
+    install_window_terminal(&mut app, id, Some(b"\x1b[?1003h\x1b[?1006h"));
+    assert!(
+        app.terminal_manager.get(id).unwrap().reports_for_test(),
+        "the terminal must accept the all-motion mode or this test is vacuous"
+    );
+
+    app.modifiers |= NEOMACS_SHIFT_MASK;
+    app.dispatch_primary_pointer_button(
+        window_id,
+        ElementState::Pressed,
+        MouseButton::Left.into(),
+        PhysicalPosition::new(4.0, 8.0),
+    );
+    assert!(
+        app.terminal_drag.is_some(),
+        "Shift must start a local selection drag, not forward the press"
+    );
+    app.dispatch_primary_pointer_button(
+        window_id,
+        ElementState::Released,
+        MouseButton::Left.into(),
+        PhysicalPosition::new(4.0, 8.0),
+    );
+    // The drag is gone, but Shift is still held: a hover move must not leak.
+    app.handle_cursor_moved(window_id, PhysicalPosition::new(20.0, 24.0));
+    assert!(
+        app.terminal_manager
+            .get(id)
+            .unwrap()
+            .take_written_for_test()
+            .is_empty(),
+        "Shift must suppress motion reports even when no drag is armed"
+    );
+
+    // Drop Shift and repeat the move: the same motion now reports, proving the
+    // empty sink above is meaningful rather than a dead terminal.
+    app.modifiers &= !NEOMACS_SHIFT_MASK;
+    app.handle_cursor_moved(window_id, PhysicalPosition::new(44.0, 24.0));
+    assert!(
+        !app.terminal_manager
+            .get(id)
+            .unwrap()
+            .take_written_for_test()
+            .is_empty(),
+        "without Shift the same motion must report"
+    );
+}
+
+#[test]
+fn cancelling_an_armed_drag_clears_it_without_copying() {
+    let (mut app, emacs) = make_test_app_with_comms(200, 100, 1.0);
+    let window_id = WindowId::from_raw(1);
+    app.frame_windows.primary_winit_id = Some(window_id);
+
+    let id = TerminalId::new(14).unwrap();
+    install_window_terminal(&mut app, id, None);
+
+    app.dispatch_primary_pointer_button(
+        window_id,
+        ElementState::Pressed,
+        MouseButton::Left.into(),
+        PhysicalPosition::new(4.0, 8.0),
+    );
+    app.handle_cursor_moved(window_id, PhysicalPosition::new(20.0, 8.0));
+    assert_eq!(
+        app.terminal_drag.map(|(drag_id, _, _)| drag_id),
+        Some(id),
+        "the drag must be armed before it is cancelled"
+    );
+    assert_eq!(
+        app.terminal_manager
+            .get(id)
+            .unwrap()
+            .selected_text()
+            .as_deref(),
+        Some("hel")
+    );
+
+    // The clear path the `Focused(false)` handler calls when focus leaves.
+    app.cancel_terminal_drag();
+
+    assert!(
+        app.terminal_drag.is_none(),
+        "a lost release must not leave the drag armed"
+    );
+    assert_eq!(
+        app.terminal_manager.get(id).unwrap().selected_text(),
+        None,
+        "the abandoned highlight must be cleared"
+    );
+    assert!(
+        terminal_selection(drain_input_events(&emacs)).is_none(),
+        "an unfinished drag is not a copy"
     );
 }

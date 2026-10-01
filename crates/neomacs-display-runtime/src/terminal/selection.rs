@@ -33,6 +33,36 @@ pub fn cell_at(
     ))
 }
 
+/// Clamp a body-relative point to the nearest cell, or `None` when there is
+/// no grid to clamp into.
+///
+/// Unlike [`cell_at`] this never rejects an out-of-body point: a drag that
+/// leaves the grid keeps extending to the nearest edge cell, which is what
+/// xterm does. `cols`/`rows` are the grid size, so the result is always a
+/// real cell and never past the last row/column.
+pub fn clamp_cell_at(
+    body: crate::core::types::Rect,
+    cell_w: f32,
+    cell_h: f32,
+    cols: usize,
+    rows: usize,
+    x: f32,
+    y: f32,
+) -> Option<(usize, usize)> {
+    if cell_w <= 0.0
+        || cell_h <= 0.0
+        || cell_w.is_nan()
+        || cell_h.is_nan()
+        || cols == 0
+        || rows == 0
+    {
+        return None;
+    }
+    let col = (((x - body.x) / cell_w).floor().max(0.0) as usize).min(cols - 1);
+    let row = (((y - body.y) / cell_h).floor().max(0.0) as usize).min(rows - 1);
+    Some((col, row))
+}
+
 /// Map a visible grid cell to a rio-vt selection position.
 pub fn pos_of(row: usize, col: usize) -> Pos {
     Pos::new(Line(row as i32), Column(col))

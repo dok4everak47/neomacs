@@ -2,7 +2,7 @@
 //! constructors, plus an end-to-end `selected_text` check through a test
 //! terminal.
 
-use super::selection::{cell_at, pos_of, simple_selection};
+use super::selection::{cell_at, clamp_cell_at, pos_of, simple_selection};
 use super::{TerminalDisplayTarget, TerminalGridSize, TerminalId, TerminalView};
 use crate::core::types::Rect;
 use rio_vt::crosswords::pos::{Column, Line, Pos, Side};
@@ -33,6 +33,37 @@ fn cell_rejects_points_outside_the_body() {
 fn cell_rejects_a_degenerate_cell() {
     assert_eq!(cell_at(body(), 0.0, 16.0, 10.0, 20.0), None);
     assert_eq!(cell_at(body(), 8.0, f32::NAN, 10.0, 20.0), None);
+}
+
+#[test]
+fn clamp_cell_at_agrees_inside_and_clamps_outside() {
+    // Inside the body the two mappings agree cell for cell.
+    for (x, y) in [(10.0, 20.0), (17.9, 35.9), (18.0, 36.0), (89.0, 59.0)] {
+        assert_eq!(
+            clamp_cell_at(body(), 8.0, 16.0, 10, 5, x, y),
+            cell_at(body(), 8.0, 16.0, x, y),
+            "inside point ({x}, {y}) must match cell_at"
+        );
+    }
+    // Far left/above collapses to the origin cell instead of being rejected.
+    assert_eq!(
+        clamp_cell_at(body(), 8.0, 16.0, 10, 5, -100.0, -100.0),
+        Some((0, 0))
+    );
+    // Far right/below clamps to the last cell of the grid.
+    assert_eq!(
+        clamp_cell_at(body(), 8.0, 16.0, 10, 5, 1000.0, 1000.0),
+        Some((9, 4))
+    );
+    // A degenerate cell size has no cell to clamp into.
+    assert_eq!(clamp_cell_at(body(), 0.0, 16.0, 10, 5, 10.0, 20.0), None);
+    assert_eq!(
+        clamp_cell_at(body(), 8.0, f32::NAN, 10, 5, 10.0, 20.0),
+        None
+    );
+    // An empty grid has no last cell either.
+    assert_eq!(clamp_cell_at(body(), 8.0, 16.0, 0, 5, 10.0, 20.0), None);
+    assert_eq!(clamp_cell_at(body(), 8.0, 16.0, 10, 0, 10.0, 20.0), None);
 }
 
 #[test]

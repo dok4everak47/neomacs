@@ -973,6 +973,21 @@ impl RenderApp {
         }
     }
 
+    /// Abandon an in-progress terminal drag without pushing a selection.
+    ///
+    /// Used when the release can no longer finalize the drag (the window lost
+    /// focus). There is no finished selection to copy, so only the highlight
+    /// is cleared; [`Self::finalize_terminal_selection`] handles a real
+    /// release.
+    #[cfg(feature = "neo-term")]
+    pub(super) fn cancel_terminal_drag(&mut self) {
+        if let Some((drag_id, _, _)) = self.terminal_drag.take()
+            && let Some(view) = self.terminal_manager.get_mut(drag_id)
+        {
+            view.clear_selection();
+        }
+    }
+
     pub(super) fn handle_mouse_input(
         &mut self,
         window_id: WindowId,
@@ -1521,27 +1536,32 @@ impl RenderApp {
             // reporting or Shift overrode reporting, so suppressing the report
             // here is exactly the press decision.
             #[cfg(feature = "neo-term")]
-            let terminal_drag_active = if let Some((drag_id, _, _)) = self.terminal_drag {
-                if let Some((mx, my, mf)) = pointer_owner.raw_target()
-                    && mf == window_state.render.emacs_frame_id
-                    && let Some(frame) = window_state.render.compositor.current_frame.as_ref()
-                    && let Some((id, col, row)) = super::terminal_pointer::terminal_cell_at(
-                        &self.terminal_manager,
+            let terminal_drag_active = {
+                let on_frame = pointer_owner
+                    .raw_target()
+                    .filter(|(_, _, mf)| *mf == window_state.render.emacs_frame_id);
+                if let (Some((mx, my, _)), Some(frame)) = (
+                    on_frame,
+                    window_state.render.compositor.current_frame.as_ref(),
+                ) {
+                    super::terminal_pointer::extend_drag(
+                        &mut self.terminal_manager,
+                        &mut self.terminal_drag,
                         frame,
                         mx,
                         my,
                     )
-                    && id == drag_id
-                {
-                    if let Some(view) = self.terminal_manager.get_mut(id) {
-                        view.update_selection(row, col);
-                    }
-                    self.terminal_drag = Some((id, col, row));
+                } else {
+                    // The pointer left this frame: keep the drag armed so
+                    // re-entering can resume it, but do not extend it from a
+                    // point we cannot resolve.
+                    self.terminal_drag.is_some()
                 }
-                true
-            } else {
-                false
             };
+            // Shift is the local-selection override even when the child asked
+            // for motion reports, mirroring the press decision.
+            #[cfg(feature = "neo-term")]
+            let shift_held = self.modifiers & crate::backend::wgpu::NEOMACS_SHIFT_MASK != 0;
             // Motion for a terminal that asked for it. `terminal_mouse_button`
             // is whatever a press over a reporting terminal recorded; with no
             // button held, only mode 1003 (report all motion) produces bytes.
@@ -1549,6 +1569,7 @@ impl RenderApp {
             // inside the same character cell.
             #[cfg(feature = "neo-term")]
             if !terminal_drag_active
+                && !shift_held
                 && let Some((mx, my, mf)) = pointer_owner.raw_target()
                 && mf == window_state.render.emacs_frame_id
                 && let Some(frame) = window_state.render.compositor.current_frame.as_ref()

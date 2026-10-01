@@ -85,6 +85,88 @@ pub(super) fn terminal_cell_at(
     None
 }
 
+/// Text body of the window showing `id`'s buffer, if `id` is a `Window`-target
+/// terminal painted on `frame`.
+fn terminal_body_for(
+    terminals: &TerminalManager,
+    frame: &FrameGlyphBuffer,
+    id: TerminalId,
+) -> Option<crate::core::types::Rect> {
+    let view = terminals.get(id)?;
+    let TerminalDisplayTarget::Window { buffer } = view.target else {
+        return None;
+    };
+    frame
+        .window_infos
+        .iter()
+        .filter(|info| info.buffer_id == buffer.0 && !info.is_minibuffer)
+        .map(RenderApp::window_text_body)
+        .next()
+}
+
+/// Extend an armed terminal drag for a pointer move that landed on the drag's
+/// own frame.
+///
+/// While the pointer is over the drag's terminal the free end moves to the
+/// cell under it. Once it leaves the grid — over chrome, another window, or
+/// past the frame edge — the selection keeps extending to the nearest edge
+/// cell, which is what xterm does. A move over a *different* terminal leaves
+/// the drag armed but does not move its free end: only the drag's own terminal
+/// controls this selection. Returns whether the drag is still armed.
+pub(super) fn extend_drag(
+    terminals: &mut TerminalManager,
+    drag: &mut Option<(TerminalId, usize, usize)>,
+    frame: &FrameGlyphBuffer,
+    x: f32,
+    y: f32,
+) -> bool {
+    let Some((drag_id, _, _)) = *drag else {
+        return false;
+    };
+    // A vanished terminal can no longer receive the selection.
+    if terminals.get(drag_id).is_none() {
+        *drag = None;
+        return false;
+    }
+    if let Some((id, col, row)) = terminal_cell_at(terminals, frame, x, y) {
+        if id == drag_id {
+            if let Some(view) = terminals.get_mut(id) {
+                view.update_selection(row, col);
+            }
+            *drag = Some((id, col, row));
+        }
+        return true;
+    }
+    let Some(body) = terminal_body_for(terminals, frame, drag_id) else {
+        // The drag's window is no longer on this frame; drop the highlight too.
+        if let Some(view) = terminals.get_mut(drag_id) {
+            view.clear_selection();
+        }
+        *drag = None;
+        return false;
+    };
+    let (cols, rows) = terminals
+        .get(drag_id)
+        .and_then(|view| view.content())
+        .map(|content| (content.cols, content.rows))
+        .unwrap_or((0, 0));
+    if let Some((col, row)) = crate::terminal::selection::clamp_cell_at(
+        body,
+        frame.char_width,
+        frame.char_height,
+        cols,
+        rows,
+        x,
+        y,
+    ) {
+        if let Some(view) = terminals.get_mut(drag_id) {
+            view.update_selection(row, col);
+        }
+        *drag = Some((drag_id, col, row));
+    }
+    true
+}
+
 /// Whether a motion report repeats the cell already on the wire.
 ///
 /// xterm re-sends a motion report only when the character cell changed

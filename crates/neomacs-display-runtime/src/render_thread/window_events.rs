@@ -285,6 +285,17 @@ impl RenderApp {
                     // events), so the next ModifiersChanged must fall back
                     // to GNU's "use the left value" rule.
                     self.modifier_sides.reset();
+                    // A drag whose release never arrived (focus left the
+                    // window) must not stay armed: it would keep swallowing
+                    // motion and painting a stale highlight. An unfinished
+                    // drag is not a copy, so only the highlight is cleared.
+                    //
+                    // `PointerLeft` deliberately does not do this: a held
+                    // button keeps the press window's implicit capture, so
+                    // the release still arrives and must finalize the
+                    // selection. Focus loss is the case where it cannot.
+                    #[cfg(feature = "neo-term")]
+                    self.cancel_terminal_drag();
                 }
                 let retirements = if focused {
                     Vec::new()
