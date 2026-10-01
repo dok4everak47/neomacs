@@ -36,7 +36,7 @@ NEO Emacs 是 GNU Emacs 的硬分叉：Elisp 的 Lisp 树随 GNU 同步，**C co
 | 内联视频 | `lisp/neomacs-video.el`（`neomacs-video-insert`、播控、循环） | Linux 走 GStreamer + VA-API，DMA-BUF 零拷贝；macOS/Windows 该 capability 为 `none` |
 | 大图显示 | `lisp/neomacs-image.el` | GPU 解码、分带上传、解码即预览；`max-image-size` 等 GNU 语义已对齐 |
 | 内联浏览器 | `lisp/neomacs-webkit.el` | Linux 用 WPE WebKit（DMA-BUF）；macOS 用系统 `WKWebView` 原生视图叠加 |
-| 内联终端 | `lisp/neo-term.el`（`neo-term-shell`、行列数等 defcustom） | GPU 后端终端；README 标注仍在开发中 |
+| 内联终端 | `lisp/neo-term.el`（`neo-term-shell`、行列数等 defcustom） | GPU 后端终端；支持子进程鼠标上报（DEC 1000/1002/1003，SGR/legacy 编码）与拖选复制到 kill-ring（Shift 覆盖子进程鼠标协议）；滚轮回看与搜索尚未接线 |
 
 ## 5. 动画（Elisp 可配，全部跑在渲染线程）
 
