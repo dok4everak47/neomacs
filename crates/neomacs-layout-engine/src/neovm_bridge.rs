@@ -4410,53 +4410,77 @@ impl FaceResolver {
                 )
             }
             ValueKind::Cons => {
-                let items = list_to_vec(val)?;
-                if items.is_empty() {
-                    return None;
-                }
-                match self.eval_filtered_face_spec(&items) {
-                    FilteredFaceSpec::Matched(filtered_spec) => {
-                        // Recurse into the filtered spec (unwrap the :filtered wrapper)
-                        return self.resolve_buffer_face_value_overlay_spec_inner(
-                            remapping,
-                            &Value::list(filtered_spec),
-                            remap_stack,
-                            depth + 1,
-                            diagnostics,
-                        );
+                // `:filtered` and the attribute-plist form need the whole
+                // list flattened; an improper list is neither, and falls
+                // through to the face-ref recursion below.
+                if let Some(items) = list_to_vec(val) {
+                    if items.is_empty() {
+                        return None;
                     }
-                    // Filter didn't match → the remap contributes nothing.
-                    FilteredFaceSpec::Rejected => return None,
-                    FilteredFaceSpec::NotFiltered => {}
-                }
-                if Self::face_spec_is_plist(&items) {
-                    let mut inline =
-                        NeoFace::from_plist_realized("--inline--", &items, self.plist_palette());
-                    let parent = inline.inherit.take().and_then(|inherit_ref| {
-                        self.resolve_buffer_face_value_overlay_spec_inner(
-                            remapping,
-                            &inherit_ref,
-                            remap_stack,
-                            depth + 1,
-                            diagnostics,
-                        )
-                    });
-                    return Some(match parent {
-                        Some(parent) => parent.merge(&inline),
-                        None => inline,
-                    });
+                    match self.eval_filtered_face_spec(&items) {
+                        FilteredFaceSpec::Matched(filtered_spec) => {
+                            // Recurse into the filtered spec (unwrap the :filtered wrapper)
+                            return self.resolve_buffer_face_value_overlay_spec_inner(
+                                remapping,
+                                &Value::list(filtered_spec),
+                                remap_stack,
+                                depth + 1,
+                                diagnostics,
+                            );
+                        }
+                        // Filter didn't match → the remap contributes nothing.
+                        FilteredFaceSpec::Rejected => return None,
+                        FilteredFaceSpec::NotFiltered => {}
+                    }
+                    if Self::face_spec_is_plist(&items) {
+                        let mut inline = NeoFace::from_plist_realized(
+                            "--inline--",
+                            &items,
+                            self.plist_palette(),
+                        );
+                        let parent = inline.inherit.take().and_then(|inherit_ref| {
+                            self.resolve_buffer_face_value_overlay_spec_inner(
+                                remapping,
+                                &inherit_ref,
+                                remap_stack,
+                                depth + 1,
+                                diagnostics,
+                            )
+                        });
+                        return Some(match parent {
+                            Some(parent) => parent.merge(&inline),
+                            None => inline,
+                        });
+                    }
                 }
 
+                // GNU `merge_face_ref` (`src/xfaces.c`): a non-plist list is
+                // ONE face ref whose CDR is itself resolved as a single ref,
+                // merged first so the CAR takes precedence.  `(FACE :attr
+                // VALUE ...)` therefore merges the attribute plist under
+                // FACE.  Splitting the list into elements instead resolved
+                // each keyword and each value as a face name, logging an
+                // "Invalid face reference" per element and dropping the
+                // attributes the plist had specified.
                 let mut composition = UnresolvedFaceComposition::default();
-                for item in items.iter().rev() {
+                let rest = val.cons_cdr();
+                if !rest.is_nil() {
                     composition.merge_optional(self.resolve_buffer_face_value_overlay_spec_inner(
                         remapping,
-                        item,
+                        &rest,
                         remap_stack,
                         depth + 1,
                         diagnostics,
                     ));
                 }
+                let first = val.cons_car();
+                composition.merge_optional(self.resolve_buffer_face_value_overlay_spec_inner(
+                    remapping,
+                    &first,
+                    remap_stack,
+                    depth + 1,
+                    diagnostics,
+                ));
                 composition.attributes
             }
             _ => None,

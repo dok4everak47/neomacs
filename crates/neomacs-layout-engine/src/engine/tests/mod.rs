@@ -29936,6 +29936,136 @@ fn layout_frame_rust_suppresses_invalid_references_inside_named_face_inheritance
     );
 }
 
+/// GNU `merge_face_ref` (`src/xfaces.c`) treats a non-plist list as ONE face
+/// ref whose CDR is recursively resolved as a single ref, merged first so the
+/// CAR takes precedence.  `(FACE :attr VALUE ...)` therefore merges the
+/// attribute plist *under* FACE.  Splitting the list into elements instead
+/// resolves each keyword and value as a face name: every dashboard hover face
+/// (`(highlight :foreground … :family … :height …)`) logged one
+/// "Invalid face reference" per element and lost the attributes the plist
+/// specified.
+#[test]
+fn layout_frame_rust_merges_face_name_plus_attribute_plist_like_gnu() {
+    use neomacs_display_protocol::face::UnderlineStyle;
+
+    let mut eval = Context::new();
+    let face_setup = eval.eval_str_each(
+        r##"(internal-make-lisp-face 'neomacs-hover-probe)
+            (internal-set-lisp-face-attribute
+             'neomacs-hover-probe :underline t (selected-frame))
+            (internal-make-lisp-face 'neomacs-hover-car-wins)
+            (internal-set-lisp-face-attribute
+             'neomacs-hover-car-wins :foreground "blue" (selected-frame))"##,
+    );
+    assert!(
+        face_setup.iter().all(Result::is_ok),
+        "install the probe faces, got {face_setup:?}"
+    );
+
+    let buf_id = eval
+        .buffer_manager()
+        .current_buffer()
+        .expect("current buffer")
+        .id();
+    {
+        let buf = eval.buffer_manager_mut().get_mut(buf_id).expect("buffer");
+        buf.insert("hover\ncamp\n");
+        // `(neomacs-hover-probe :foreground GREEN :family … :height 1.2)`
+        let hover_face = Value::list(vec![
+            Value::symbol("neomacs-hover-probe"),
+            Value::keyword("foreground"),
+            Value::string("#00ff00"),
+            Value::keyword("family"),
+            Value::string("Terminus (TTF)"),
+            Value::keyword("height"),
+            Value::make_float(1.2),
+        ]);
+        buf.put_text_property(0, "hover".len(), Value::symbol("face"), hover_face);
+        // `(neomacs-hover-car-wins :foreground RED)` — the named face's own
+        // foreground must win, because the CAR is merged last.
+        let car_wins_face = Value::list(vec![
+            Value::symbol("neomacs-hover-car-wins"),
+            Value::keyword("foreground"),
+            Value::string("#ff0000"),
+        ]);
+        buf.put_text_property(
+            "hover\n".len(),
+            "hover\ncamp".len(),
+            Value::symbol("face"),
+            car_wins_face,
+        );
+    }
+
+    let frame_id =
+        eval.frame_manager_mut()
+            .create_frame("layout-face-name-plus-plist", 640, 160, buf_id);
+    eval.frame_manager_mut()
+        .get_mut(frame_id)
+        .expect("frame")
+        .set_window_system(Some(Value::symbol("neo")));
+    assert!(eval.frame_manager_mut().select_frame(frame_id));
+
+    let mut engine = LayoutEngine::new();
+    engine.layout_frame_rust(&mut eval, frame_id);
+
+    let messages = eval
+        .buffer_manager()
+        .find_buffer_by_name("*Messages*")
+        .and_then(|id| eval.buffer_manager().get(id))
+        .map_or_else(String::new, |buffer| buffer.buffer_string());
+    assert!(
+        !messages.contains("Invalid face reference"),
+        "GNU accepts `(FACE :attr VALUE ...)` without diagnostics: {messages:?}"
+    );
+
+    let state = engine
+        .last_frame_display_state
+        .as_ref()
+        .expect("display state");
+    let selected_window = eval
+        .frame_manager()
+        .get(frame_id)
+        .expect("frame")
+        .selected_window;
+    let entry = state
+        .window_matrices
+        .iter()
+        .find(|entry| entry.window_id.get() == selected_window.0 as i64)
+        .expect("selected window matrix");
+    let face_for = |ch: char| {
+        let glyph = entry
+            .matrix
+            .rows
+            .iter()
+            .filter(|row| row.enabled && row.role == GlyphRowRole::Text)
+            .flat_map(|row| row.glyphs[GlyphArea::Text.index()].iter())
+            .find(|glyph| matches!(glyph.glyph_type, GlyphType::Char { ch: c } if c == ch))
+            .unwrap_or_else(|| panic!("rendered glyph {ch:?}"));
+        state
+            .faces
+            .get(&glyph.face_id)
+            .unwrap_or_else(|| panic!("resolved face for glyph {ch:?}"))
+    };
+
+    let hover = face_for('h');
+    assert_eq!(
+        hover.foreground,
+        Color::from_pixel(0x0000_ff00),
+        "the attribute plist must apply to attributes the named face leaves unspecified"
+    );
+    assert_ne!(
+        hover.underline_style,
+        UnderlineStyle::None,
+        "the named face must still contribute its own attributes"
+    );
+    let car_wins = face_for('c');
+    assert_eq!(
+        car_wins.foreground,
+        Color::from_pixel(0x0000_00ff),
+        "the list CAR takes precedence over the CDR, as in GNU's backwards merge"
+    );
+}
+
 #[test]
 fn layout_frame_rust_keeps_echo_message_in_minibuffer_window_for_tty() {
     assert_echo_message_renders_in_minibuffer_window(false);
