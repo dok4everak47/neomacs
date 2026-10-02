@@ -59,10 +59,65 @@ sentinel errors route through the shared command-error reporter with GNU's
 context strings, and batch exits 255 with the diagnostic on stderr, matching
 GNU byte for byte on all three reductions.
 
-Not re-verified and still the real open signal: the eleven failing parity
-suites from 2026-08-05, which have never been mapped to ledger entries. At
-least ace_link's help-buffer link offset looks like a divergence this ledger
-does not contain.
+Not re-verified here, but mapped in the next section: the eleven failing parity
+suites from 2026-08-05. They were mapped and diagnosed the same day the sweep
+was published; the paragraph that used to sit here said they "have never been
+mapped", which was never true of this file and became confusing once the map
+landed below it.
+
+## Verification status 2026-10-02
+
+The map below was re-checked end to end on this machine. Two things about it
+had rotted, and both are corrected in place:
+
+1. **Every fix hash in the map was dangling.** The map's original commit,
+   upstream `e7d62ad17`, was authored on top of `489fbc18f` ("refactor:
+   organize Cargo packages under crates"), a history-rewriting commit that
+   replaced the tree it was built on. None of `5dd14bf22`, `7ac897fee`,
+   `5f926d612`, `b20ec53b9`, `392a9f90c` or `a5ebb0d7a` is in the object
+   database, so `git show <hash>` could not reach the fix that justified the
+   row. The table now cites commits that resolve, and the entry bodies cite the
+   current ones where they named a dangling hash too.
+2. **Entry 45's measured output was stale.** It claimed the reduction answers
+   `(:lines 2311 ...)`; it answers 2393 on this tree. Entry 56 already says the
+   "82 lines of 2393" framing is WRONG, so the two contradict each other.
+
+Each mapped entry's own reduction was then re-run in both editors
+(`target/release/neomacs` and a GNU), with the driver kept at
+`tmp/divsweep2/reductions.el` so the run is repeatable:
+
+| entry | suite | reduction now |
+|---|---|---|
+| 44 | rainbow_delimiters | both give `5` |
+| 45 | helm_descbinds | both give `(:lines 2393 :has-global-binding t :has-function-key-map t)` |
+| 46 | swiper | both give `(from-grandparent from-grandparent)` |
+| 47 | lsp_mode | both give `"greet"` -- undo restores the original |
+| 48 | elisp_slime_nav | both give `((foo bar) nil)` for link 1; link 2 is entry 57 |
+| 49 | counsel | both give the quotified `command-history` list |
+| 50 | dumb_jump | both give `(#("SYM" 0 3 (p 1)) "SYM" "SYM: \"extra\"" "SYM: more")` |
+| 51 | evil_numbers | both give `("aa 999 bb" 4 7)`, and both signal `(args-out-of-range 2 99)` on the second probe |
+| 52 | vi_tilde_fringe | both give `(t 25)` |
+
+The named regression the fix landed with was run for 44, 45, 46, 47, 48, 49,
+50, 51 and 52; all pass. Entry 47's two `replace_region_contents_test` tests
+**panic under `cargo test`** at `text/chartable/mod.rs:118` and pass under the
+prescribed `cargo nextest` runner (26/26). That is a shared-process isolation
+problem in the hidden crate's test harness, a separate defect from the entry,
+and it is filed below as entry 221 rather than waved away.
+
+**Caveat on the oracle.** This box has no GNU 31.1. The comparison above ran
+against GNU 30.2, and the pinned reference refuses to be scored against it
+(`scripts/parity-reference-attest.sh` exits 3). Every reduction in the table is
+a value both editors print, and none of the nine depends on a feature GNU
+changed between 30.2 and 31.1, but these are **UNATTESTED** numbers: they are
+weaker evidence than a suite run on the pinned oracle, and the suite itself was
+**not** re-run. Seeing the eleven suites flip green needs a 31.1 oracle on
+PATH (or `NEOMACS_MELPA_ORACLE_EMACS`), which is what CI provisions.
+
+`target/release/emacs-31.1.1` is NOT that oracle and must not be used as one:
+it is a second hard link to this port's own binary (`neomacs --version` says
+`Neomacs 0.0.19`; `emacs-version` is 31.1 because the port reports GNU's
+version, so a version string alone cannot tell them apart).
 
 ## The eleven failing suites, mapped 2026-08-09
 
@@ -73,16 +128,16 @@ single-feature gap, and only one was a harness defect.
 | suite | verdict |
 |---|---|
 | auctex_latexmk | already green; nothing was wrong with it |
-| ace_link | HARNESS DEFECT, fixed 5dd14bf22 -- it failed on *both* editors, the signature of a stale expectation. Avy label positions were recorded as buffer offsets, and two workflows build a buffer quoting the sandbox root, so every offset past it carried the path length. Now recorded as line and column |
-| counsel | entry 49, FIXED 7ac897fee -- `command-history` recorded raw argument values; GNU's `quotify_arg`, `varies` and `fix_command` were all missing |
-| dumb_jump | entry 50, FIXED 5f926d612 -- `error-message-string` kept text properties GNU strips everywhere but the `(error STRING)` fast path |
-| evil_numbers | entry 51, FIXED b20ec53b9 -- `replace-match` refused any match data recorded as string-sourced, which is what `set-match-data` from plain integers produces |
-| vi_tilde_fringe | entry 52, FIXED 392a9f90c -- `define-fringe-bitmap` never registered the symbol in `fringe-bitmaps` |
-| rainbow_delimiters | entry 44, FIXED a5ebb0d7a -- the sexp scanner read the `syntax-table` text property raw instead of through GNU's `textget`, so a syntax supplied via `category` (the CC Mode `c-use-category` mechanism) was invisible to it |
-| helm_descbinds | entry 45 (`describe-bindings` omits global bindings and the function-key map) |
-| swiper | entry 46 (query-replace replaces nothing; not reduced below the package) |
-| lsp_mode | entry 47, **DATA LOSS**, FIXED -- `replace-buffer-contents` could not be undone; a zero-length deletion was not recorded, so two insertions coalesced. Reduced to pure ASCII; **not a multibyte bug at all** |
-| elisp_slime_nav | entry 48 (an error message loses a text property; not reduced below the package) |
+| ace_link | HARNESS DEFECT, fixed `19c66241f` -- it failed on *both* editors, the signature of a stale expectation. Avy label positions were recorded as buffer offsets, and two workflows build a buffer quoting the sandbox root, so every offset past it carried the path length. Now recorded as line and column |
+| counsel | entry 49, FIXED `baab62ae4` -- `command-history` recorded raw argument values; GNU's `quotify_arg`, `varies` and `fix_command` were all missing |
+| dumb_jump | entry 50, FIXED `964e1af38` -- `error-message-string` kept text properties GNU strips everywhere but the `(error STRING)` fast path |
+| evil_numbers | entry 51, FIXED `f5500a179` -- `replace-match` refused any match data recorded as string-sourced, which is what `set-match-data` from plain integers produces |
+| vi_tilde_fringe | entry 52, FIXED `1305a6316` -- `define-fringe-bitmap` never registered the symbol in `fringe-bitmaps` |
+| rainbow_delimiters | entry 44, FIXED `91f4296b3` -- the sexp scanner read the `syntax-table` text property raw instead of through GNU's `textget`, so a syntax supplied via `category` (the CC Mode `c-use-category` mechanism) was invisible to it |
+| helm_descbinds | entry 45, FIXED `97b00a2c3` (`describe-bindings` omits global bindings and the function-key map) |
+| swiper | entry 46, FIXED `d43ade435` (query-replace replaces nothing; not reduced below the package) |
+| lsp_mode | entry 47, **DATA LOSS**, FIXED `0bc9fba3c` -- `replace-buffer-contents` could not be undone; a zero-length deletion was not recorded, so two insertions coalesced. Reduced to pure ASCII; **not a multibyte bug at all** |
+| elisp_slime_nav | entry 48: link 1 FIXED `e361b5549`, link 2 is entry 57 (an error message loses a text property) |
 
 Every genuine divergence has a numbered entry with its reduction, kept after
 the fix lands as the regression record.
@@ -1611,7 +1666,7 @@ reads the autoload file's `load-history` record and gets
 
 ## 44. The sexp scanner does not follow a `category` text property -- FIXED
 
-FIXED 2026-08-09 (a5ebb0d7a fix, 6670885b6 perf). The scanner now resolves its
+FIXED 2026-08-09 (`91f4296b3` fix, `66c96489c` perf). The scanner now resolves its
 `syntax-table` property through the shared `textget` implementation
 (`CharPropertyResolver`, crates/neovm-core/src/emacs_core/textprop.rs), so it agrees
 with `get-char-property` on every character by construction. The
@@ -1626,7 +1681,7 @@ fallbacks apply only where an interval exists (GNU `update_syntax_table`
 returns early when `interval_of` finds none). Cost: NET NEGATIVE. On a fontified
 160k-char syntax-scan sweep the rung is -4.37% instructions against the
 pre-fix baseline, and TTY typing is -0.64%. Routing the scanner through the
-resolver initially cost +1.29%; 755689fa4 then gave the byte-addressed
+resolver initially cost +1.29%; `66c96489c` then gave the byte-addressed
 scanners (regexp matcher, `forward-comment`, `backward-prefix-chars`) the
 property-run cache GNU's `gl_state` has always given them, which removed a
 per-character byte->char conversion they had been paying all along: regexp
@@ -1701,8 +1756,10 @@ correctness test.
 
 **Fixed on three independent causes**, each with its own root and its own
 regression test. The reduction below now answers
-`(:lines 2311 :has-global-binding t :has-function-key-map t)`; the residual 82
-lines against GNU's 2393 are entry 56 (raw 8-bit key descriptions), not this one.
+`(:lines 2393 :has-global-binding t :has-function-key-map t)` on the 2026-10-02
+re-run (an earlier revision of this entry recorded 2311; see the verification
+note at the top). The residual against GNU is entry 56 (raw 8-bit key
+descriptions), not this one.
 
 1. **`accessible-keymaps` did not follow a prefix bound to a SYMBOL.** GNU
    `accessible_keymaps_1` resolves every binding with
@@ -7023,7 +7080,7 @@ between GNU 31.0.90 and Neomacs, and
 `cargo nextest run -p neomacs-melpa-tests --release -E 'test(/company_go/)'`
 fails on one field of one case, and it fails **in both editors**, which the
 eleven-suites table above already names as the signature of a stale
-expectation (ace_link, fixed 5dd14bf22, was the same shape):
+expectation (ace_link, fixed `19c66241f`, was the same shape):
 
 ```
 snapshot mismatches: the_invocation_contract_through_a_fake_gocode (GNU Emacs),
@@ -48667,3 +48724,56 @@ The state is still reset by `signal_from_binding_value` (used by the thread laye
 - **"`load` re-signals the error at each level."** No -- measured: `signal` is called once. The signal object survives; only the search state was lost.
 - **"`signal-hook-function` runs 6x where GNU runs it once."** No -- the probe was wrong, not the code. A hook that counts *every* call sees five `void-variable` signals this port raises during `load` setup, and GNU raises its own dozen of that same class; filtering the count to the symbol the probe actually signals turns 6-vs-1 into 1-vs-1. This one is worth recording because the raw number looked like a clean, damning divergence and was instead a probe measuring the wrong population.
 - **"The signal-hook 'before' numbers match the backtrace 'before' numbers."** No -- assumed, then measured, and wrong: the backtrace count was 3/7/9 and the hook count 3/5/7 on two different binaries. They are two probes over the same mechanism and there was no reason for their counts to agree; the ledger records both rather than one derived from the other.
+
+---
+
+## 221. Restoring a `current-buffer` panics in `cargo test` when another thread holds the thread-local runtime
+
+Not a GNU divergence: this is a crash inside this port's own test harness,
+found on 2026-10-02 while re-running the entry 47 regression suite.
+
+```text
+thread '…replace_region_contents_test::replace_region_contents_undo_list_shape_matches_gnu' panicked at
+crates/neovm-core/src/emacs_core/text/chartable/mod.rs:118:50:
+called `Option::unwrap()` on a `None` value
+
+  5: is_char_table            ./src/emacs_core/text/chartable/mod.rs:118:50
+  6: char_table_has_subtype_named     ./src/emacs_core/text/chartable/mod.rs:3182:9
+  7: current_buffer_syntax_table_object_in_buffers  ./src/emacs_core/text/syntax/mod.rs:2927:27
+  8: sync_current_buffer_syntax_table_state      ./src/emacs_core/text/syntax/mod.rs:2950:13
+  9: sync_current_buffer_runtime_state      ./src/emacs_core/runtime/eval/gc_pacing.rs:515:9
+ 10: restore_current_buffer_if_live          ./src/emacs_core/runtime/eval/gc_pacing.rs:565:22
+ 11: {closure#0}                             ./src/emacs_core/runtime/eval/specpdl.rs:899:30
+ 12: unbind_to_result                        ./src/emacs_core/runtime/eval/specpdl.rs:698:22
+ 16: sf_save_current_buffer_value             ./src/emacs_core/runtime/eval/special_forms.rs:1190:14
+```
+
+The two reads the line makes are of the **same header**, and they disagree, which
+is the defect. `Value::is_vector` (`tagged/value.rs:881`) goes through
+`veclike_type` (`:790`) and reads the object's own `type_tag`. `as_vector_data`
+(`runtime/value/mod.rs:3608`) then has exactly one `None` source -- its
+`as_veclike_ptr()` (`:725`), whose guard is the same `is_veclike` tag test that
+`is_vector` has already passed. So for `None` to come back here, the 8-byte
+register changed between the two reads of one value: either the object moved
+under a relocating GC between them, or the pointer is stale. Both are
+use-after-move class, the family the `gc-stress` detector and DIVERGENCES 161/162
+exist for.
+
+Which of the two it is, and why only this suite reaches the state, is **not**
+established. This is a hypothesis with one measurement behind it (the
+contradiction between two reads of one header, which is real), not a diagnosis.
+
+Reproduced deterministically: `cargo test -p neovm-core --lib --
+replace_region_contents` fails both `..._undo_list_shape_matches_gnu` and
+`..._records_gnu_undo_boundary_before_the_change_runs` at
+`--test-threads` 2, 4 and 24, on 3 of 3 consecutive runs each. `--test-threads=1`
+passes all 26, and the prescribed runner (`cargo nextest`, one process per test)
+passes **26/26** -- which is why the suite has never shown this: nextest never
+puts two tests in one process, and this box has no `cargo-nextest` on `PATH`, so
+`cargo test` is not the runner CI uses.
+
+Not fixed here, deliberately: the fix belongs in the hidden crate's runtime
+routing, not in this ledger's doc pass, and guessing at it would be exactly the
+kind of change that needs `cargo xtask gc-stress` behind it. Filed so the next
+person who sees a red `cargo test` does not spend the hour re-deriving that the
+tests are fine and the harness is not.
