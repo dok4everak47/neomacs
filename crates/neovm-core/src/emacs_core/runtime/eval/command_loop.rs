@@ -2111,7 +2111,10 @@ impl Context {
                 cur_count.set(cur_count.get() + 1);
                 #[cfg(debug_assertions)]
                 {
-                    let origin = format!("context-root#{root_index}");
+                    let origin = format!(
+                        "context-root#{root_index}/group={}",
+                        cur_name.get().unwrap_or("<none>")
+                    );
                     root_index += 1;
                     unsafe {
                         (*heap_ptr).seed_root_with_origin(root, &origin);
