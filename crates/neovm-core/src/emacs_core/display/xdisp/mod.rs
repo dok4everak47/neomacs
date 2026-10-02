@@ -3990,10 +3990,121 @@ pub(crate) fn builtin_invisible_p(eval: &mut super::eval::Context, args: Vec<Val
 
 /// (line-pixel-height) -> integer
 ///
-/// Batch-compatible behavior returns 1.
-pub(crate) fn builtin_line_pixel_height(args: Vec<Value>) -> EvalResult {
+/// GNU `Fline_pixel_height` (`src/xdisp.c`): the height in pixels of the
+/// screen line at point in the selected window, measured from the start of
+/// that screen line (`start_display` + `move_it_by_lines (0)` +
+/// `line_bottom_y`).
+///
+/// The bootstrap/`--batch` frame has no display; GNU's walk degenerates to 1
+/// there, and 1 is also the right answer for a TTY frame, whose pixel unit is
+/// one character cell.  A real frame answers with the row the point landed
+/// on: the retained redisplay snapshot first, then the same on-demand row
+/// walk `pos-visible-in-window-p` uses.  A point scrolled out of the viewport
+/// is still measured, from the first row of its source line.
+pub(crate) fn builtin_line_pixel_height(
+    eval: &mut super::eval::Context,
+    args: Vec<Value>,
+) -> EvalResult {
     expect_args("line-pixel-height", &args, 0)?;
-    Ok(Value::fixnum(1))
+
+    let Some((frame_id, window_id)) = resolve_live_window_identity(&eval.frames, None)? else {
+        return Ok(Value::fixnum(1));
+    };
+    let Some(frame) = eval.frames.get(frame_id) else {
+        return Ok(Value::fixnum(1));
+    };
+    if frame.initial {
+        return Ok(Value::fixnum(1));
+    }
+    let Some(buffer_id) = frame
+        .find_window(window_id)
+        .and_then(|window| window.buffer_id())
+    else {
+        return Ok(Value::fixnum(1));
+    };
+    let Some(buffer_point) = eval
+        .buffers
+        .get(buffer_id)
+        .map(|buffer| buffer.point_lisp_char_pos())
+    else {
+        return Ok(Value::fixnum(1));
+    };
+
+    let row_height = |snapshot: &crate::window::WindowDisplaySnapshot| -> Option<i64> {
+        let point = snapshot.point_for_buffer_pos(buffer_point)?;
+        Some(
+            snapshot
+                .row_metrics(point.row)
+                .map_or(point.height, |row| row.height),
+        )
+    };
+
+    if let Some(snapshot) = eval.fresh_window_display_snapshot(frame_id, window_id, buffer_id)
+        && let Some(height) = row_height(snapshot)
+    {
+        return Ok(Value::fixnum(height));
+    }
+    match eval.query_window_layout(frame_id, window_id) {
+        crate::window::WindowLayoutQueryOutcome::Ready(query) => {
+            if let Some(height) = query.into_geometry().as_ref().and_then(row_height) {
+                return Ok(Value::fixnum(height));
+            }
+        }
+        crate::window::WindowLayoutQueryOutcome::Unavailable => return Ok(Value::fixnum(1)),
+        crate::window::WindowLayoutQueryOutcome::LayoutBusy => {
+            return Err(signal(
+                LispCondition::Error,
+                vec![Value::string(
+                    "Window layout query reentered an active layout callback",
+                )],
+            ));
+        }
+        crate::window::WindowLayoutQueryOutcome::Failed(failure) => {
+            return Err(signal(
+                LispCondition::Error,
+                vec![Value::string(failure.message())],
+            ));
+        }
+    }
+
+    // Off the viewport: GNU still measures the line at point.  Ask the
+    // canonical row producer for the first row of the source line containing
+    // point, the same place GNU's `move_it_by_lines (0)` backtracks to.
+    let Some(line_start) = eval.buffers.get(buffer_id).map(|buffer| {
+        buffer.emacs_byte_pos_to_lisp_char_pos(motion::measurement::source_line_start(
+            buffer,
+            buffer.lisp_pos_to_emacs_byte_pos(buffer_point),
+        ))
+    }) else {
+        return Ok(Value::fixnum(1));
+    };
+    match eval.query_window_layout_scope(
+        frame_id,
+        window_id,
+        crate::window::WindowLayoutQueryScope::Rows {
+            start: line_start,
+            count: std::num::NonZeroUsize::MIN,
+        },
+    ) {
+        crate::window::WindowLayoutQueryOutcome::Ready(query) => Ok(Value::fixnum(
+            query
+                .into_geometry()
+                .as_ref()
+                .and_then(|snapshot| snapshot.rows.first())
+                .map_or(1, |row| row.height),
+        )),
+        crate::window::WindowLayoutQueryOutcome::Unavailable => Ok(Value::fixnum(1)),
+        crate::window::WindowLayoutQueryOutcome::LayoutBusy => Err(signal(
+            LispCondition::Error,
+            vec![Value::string(
+                "Window layout query reentered an active layout callback",
+            )],
+        )),
+        crate::window::WindowLayoutQueryOutcome::Failed(failure) => Err(signal(
+            LispCondition::Error,
+            vec![Value::string(failure.message())],
+        )),
+    }
 }
 
 /// (window-text-pixel-size &optional WINDOW FROM TO X-LIMIT Y-LIMIT MODE) -> (WIDTH . HEIGHT)

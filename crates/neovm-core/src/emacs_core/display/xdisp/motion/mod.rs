@@ -4,7 +4,7 @@
 //! redisplay. Retained rows are a fast path, not a substitute for measurement.
 //! GNU's intentionally different batch engine stays in `editing/indent`.
 
-mod measurement;
+pub(super) mod measurement;
 pub(crate) mod paging;
 pub(crate) mod pixels;
 mod policy;

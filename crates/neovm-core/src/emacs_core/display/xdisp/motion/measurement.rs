@@ -6,7 +6,10 @@ use crate::buffer::{Buffer, EmacsByteLen, EmacsBytePos};
 use crate::window::{WindowLayoutQueryOutcome, WindowLayoutQueryScope};
 use std::num::NonZeroUsize;
 
-fn source_line_start(buffer: &Buffer, pos: EmacsBytePos) -> EmacsBytePos {
+pub(in crate::emacs_core::xdisp) fn source_line_start(
+    buffer: &Buffer,
+    pos: EmacsBytePos,
+) -> EmacsBytePos {
     let region = buffer.accessible_emacs_byte_region();
     let raw_line_start = |position| {
         buffer

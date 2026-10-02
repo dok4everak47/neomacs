@@ -1786,7 +1786,10 @@ fn test_invisible_p() {
 #[test]
 fn test_line_pixel_height() {
     crate::test_utils::init_test_tracing();
-    let result = builtin_line_pixel_height(vec![]).unwrap();
+    // No live display: the bootstrap/`--batch` frame answers GNU's degenerate
+    // value 1, which the oracle corpus pins.
+    let mut eval = interactive_context();
+    let result = builtin_line_pixel_height(&mut eval, vec![]).unwrap();
     assert_eq!(result, Value::fixnum(1));
 }
 
@@ -2855,6 +2858,199 @@ fn window_text_pixel_size_rejects_snapshot_after_narrowing() {
     assert_eq!(
         result,
         Value::list(vec![Value::fixnum(1), Value::fixnum(32), Value::fixnum(3),])
+    );
+}
+
+fn line_pixel_height_row(
+    row: i64,
+    y: i64,
+    height: i64,
+    start: i64,
+    end: i64,
+) -> crate::window::DisplayRowSnapshot {
+    crate::window::DisplayRowSnapshot {
+        row,
+        y,
+        height,
+        start_buffer_pos: Some(crate::buffer::LispCharPos1::new(start)),
+        end_buffer_pos: Some(crate::buffer::LispCharPos1::new(end)),
+        ..Default::default()
+    }
+}
+
+fn line_pixel_height_point(pos: i64, row: i64, y: i64) -> crate::window::DisplayPointSnapshot {
+    crate::window::DisplayPointSnapshot {
+        role: crate::window::DisplayPointRole::Glyph,
+        buffer_pos: crate::buffer::LispCharPos1::new(pos),
+        x: 0,
+        y,
+        width: 11,
+        height: 26,
+        row,
+        col: 0,
+    }
+}
+
+/// GNU `Fline_pixel_height` (`src/xdisp.c`) answers with the height of the
+/// row the point landed on.  A retained redisplay snapshot must serve that
+/// row, not a batch constant: `dashboard.el`'s `dashboard-vertically-center`
+/// divides by this value, and a hard-coded 1 scrolled the whole dashboard
+/// off-screen on the GUI frame.
+#[test]
+fn line_pixel_height_reads_the_row_the_point_landed_on() {
+    crate::test_utils::init_test_tracing();
+    let (mut eval, selected_window) = pixel_size_tty_context();
+    let frame_id = eval.frames.selected_frame().expect("selected frame").id;
+    eval.frames.get_mut(frame_id).expect("frame").initial = false;
+    let buf_id = eval.buffers.current_buffer().expect("current buffer").id;
+    eval.buffers
+        .get_mut(buf_id)
+        .expect("buffer")
+        .insert("first line\nsecond line\n");
+    eval.eval_str("(goto-char 1)").expect("point to first line");
+
+    let window_id = crate::window::WindowId(selected_window as u64);
+    let layout_freshness = eval
+        .window_display_snapshot_freshness(frame_id, window_id, buf_id)
+        .expect("freshness token");
+    eval.frames
+        .selected_frame_mut()
+        .expect("selected frame")
+        .commit_redisplay_cache_for_test(vec![crate::window::WindowDisplaySnapshot {
+            window_id,
+            points: vec![line_pixel_height_point(1, 0, 0)],
+            rows: vec![line_pixel_height_row(0, 0, 45, 1, 2)],
+            layout_freshness: Some(layout_freshness),
+            ..Default::default()
+        }]);
+
+    assert_eq!(
+        builtin_line_pixel_height(&mut eval, vec![]).unwrap(),
+        Value::fixnum(45)
+    );
+}
+
+/// Before the command loop's first redisplay the retained matrix is empty;
+/// GNU still answers `line-pixel-height` because it runs `start_display` +
+/// `move_it_by_lines` on demand.  The synchronous layout query is where this
+/// port runs that walk, so the builtin must ask for it.
+#[test]
+fn line_pixel_height_asks_the_live_layout_before_redisplay() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = interactive_context();
+    let buf_id = eval.buffers.current_buffer().expect("current buffer").id;
+    let frame_id = eval
+        .frames
+        .create_frame("xdisp-line-height-cold", 800, 600, buf_id);
+    let window_id = eval.frames.get(frame_id).expect("frame").selected_window;
+    eval.frames.get_mut(frame_id).expect("frame").initial = false;
+    eval.buffers
+        .get_mut(buf_id)
+        .expect("buffer")
+        .insert("first line\nsecond line\n");
+    eval.eval_str("(goto-char 1)").expect("point to first line");
+    assert!(
+        eval.frames
+            .get(frame_id)
+            .expect("frame")
+            .redisplay_snapshot(window_id)
+            .is_none(),
+        "the fixture must start with no retained rows, or it measures the warm path"
+    );
+
+    let scopes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = std::rc::Rc::clone(&scopes);
+    eval.install_window_layout_query(move |_eval, queried_frame, queried_window, scope| {
+        assert_eq!(queried_frame, frame_id);
+        assert_eq!(queried_window, window_id);
+        observed.borrow_mut().push(scope);
+        crate::window::WindowLayoutQueryOutcome::Ready(crate::window::WindowLayoutQuery::new(
+            crate::buffer::LispCharPos1::ONE,
+            Some(crate::window::WindowDisplaySnapshot {
+                window_id,
+                points: vec![line_pixel_height_point(1, 0, 0)],
+                rows: vec![line_pixel_height_row(0, 0, 45, 1, 2)],
+                ..Default::default()
+            }),
+        ))
+    });
+
+    assert_eq!(
+        builtin_line_pixel_height(&mut eval, vec![]).unwrap(),
+        Value::fixnum(45)
+    );
+    assert_eq!(
+        *scopes.borrow(),
+        vec![crate::window::WindowLayoutQueryScope::Viewport]
+    );
+}
+
+/// A point scrolled out of the viewport is not covered by the viewport rows;
+/// GNU still measures its screen line by backtracking to the line start
+/// (`move_it_by_lines (0)`), so the builtin must fall back to the scoped row
+/// walk instead of giving up.
+#[test]
+fn line_pixel_height_measures_the_line_of_an_off_viewport_point() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = interactive_context();
+    let buf_id = eval.buffers.current_buffer().expect("current buffer").id;
+    let frame_id = eval
+        .frames
+        .create_frame("xdisp-line-height-offscreen", 800, 600, buf_id);
+    let window_id = eval.frames.get(frame_id).expect("frame").selected_window;
+    eval.frames.get_mut(frame_id).expect("frame").initial = false;
+    eval.buffers
+        .get_mut(buf_id)
+        .expect("buffer")
+        .insert("first line\nsecond line\n");
+    eval.eval_str("(goto-char 1)").expect("point to first line");
+
+    let scopes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = std::rc::Rc::clone(&scopes);
+    eval.install_window_layout_query(move |_eval, _frame, _window, scope| {
+        observed.borrow_mut().push(scope);
+        let snapshot = match scope {
+            // Redisplay has scrolled past point: 5..6 is what the viewport
+            // covers, and position 1 is nowhere on screen.
+            crate::window::WindowLayoutQueryScope::Viewport => {
+                crate::window::WindowDisplaySnapshot {
+                    window_id,
+                    points: vec![line_pixel_height_point(5, 0, 0)],
+                    rows: vec![line_pixel_height_row(0, 0, 20, 5, 6)],
+                    ..Default::default()
+                }
+            }
+            crate::window::WindowLayoutQueryScope::Rows { start, count } => {
+                assert_eq!(start, crate::buffer::LispCharPos1::new(1));
+                assert_eq!(count.get(), 1);
+                crate::window::WindowDisplaySnapshot {
+                    window_id,
+                    points: vec![line_pixel_height_point(1, 0, 0)],
+                    rows: vec![line_pixel_height_row(0, 0, 30, 1, 2)],
+                    ..Default::default()
+                }
+            }
+            other => panic!("unexpected layout query scope {other:?}"),
+        };
+        crate::window::WindowLayoutQueryOutcome::Ready(crate::window::WindowLayoutQuery::new(
+            crate::buffer::LispCharPos1::ONE,
+            Some(snapshot),
+        ))
+    });
+
+    assert_eq!(
+        builtin_line_pixel_height(&mut eval, vec![]).unwrap(),
+        Value::fixnum(30)
+    );
+    assert_eq!(
+        *scopes.borrow(),
+        vec![
+            crate::window::WindowLayoutQueryScope::Viewport,
+            crate::window::WindowLayoutQueryScope::Rows {
+                start: crate::buffer::LispCharPos1::new(1),
+                count: std::num::NonZeroUsize::MIN,
+            },
+        ]
     );
 }
 
@@ -5765,7 +5961,10 @@ fn test_long_line_optimizations_p() {
 #[test]
 fn test_wrong_arity() {
     crate::test_utils::init_test_tracing();
-    assert!(builtin_line_pixel_height(vec![Value::fixnum(1)]).is_err());
+    {
+        let mut ev = crate::emacs_core::Context::new();
+        assert!(builtin_line_pixel_height(&mut ev, vec![Value::fixnum(1)]).is_err());
+    }
     {
         let mut ev = crate::emacs_core::Context::new();
         assert!(builtin_invisible_p(&mut ev, vec![]).is_err());
